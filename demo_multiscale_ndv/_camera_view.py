@@ -86,10 +86,6 @@ def camera_view_from_gfx_2d(
 ) -> CameraView2D:
     """Build a CameraView2D from a pygfx orthographic camera.
 
-    The pygfx ``OrthographicCamera`` width and height must be scaled by the
-    canvas aspect ratio to obtain the true world-space extents; this function
-    performs that correction automatically.
-
     Parameters
     ----------
     camera : gfx.OrthographicCamera
@@ -113,7 +109,7 @@ def camera_view_from_gfx_2d(
 
     # Get the height and width of the camera in world space.
     # The OrthographicCamera width and height need to be scaled
-    # by the canvas size. See pygfx OrthographicCamera docstring.
+    # by the canvas size. See maintain_aspect in the pygfx OrthographicCamera docstring.
     cam_width, cam_height = float(camera.width), float(camera.height)
     cam_aspect = cam_width / cam_height
     if canvas_aspect >= cam_aspect:
