@@ -2,7 +2,7 @@
 
 Usage::
 
-    uv run demo_3d.py --zarr-path /tmp/example.ome.zarr --voxel-scales 4.0 1.0 1.0
+    uv run demo_3d.py --zarr-path /tmp/example.ome.zarr
 
 Controls:
     Orbit:  left-drag
@@ -52,7 +52,6 @@ def reslice_3d(
     visual: GFXMultiscaleImageVisual,
     data_store: OMEZarrImageDataStore,
     camera: gfx.PerspectiveCamera,
-    renderer: gfx.WgpuRenderer,
     canvas,
     slicer: AsyncSlicer,
     lod_bias: float = LOD_BIAS,
@@ -130,7 +129,6 @@ def build_visual(
         full_level_shapes=list(shapes),
         full_level_transforms=list(level_transforms),
         gpu_budget_bytes_3d=GPU_BUDGET_3D_BYTES,
-        aabb_enabled=False,
     )
     return visual
 
@@ -138,17 +136,7 @@ def build_visual(
 def main() -> None:
     parser = argparse.ArgumentParser(description="3-D multiscale brick-cache viewer")
     parser.add_argument("--zarr-path", required=True, help="Path or URI to OME-Zarr store")
-    parser.add_argument(
-        "--voxel-scales",
-        nargs="+",
-        type=float,
-        default=[1.0, 1.0, 1.0],
-        metavar="S",
-        help="Per-axis physical voxel size in ZYX data order",
-    )
     args = parser.parse_args()
-
-    voxel_scales = args.voxel_scales
 
     # ── Load data store ──────────────────────────────────────────────────
     print(f"Opening: {args.zarr_path}")
@@ -157,13 +145,11 @@ def main() -> None:
     print(f"  shapes  : {data_store.level_shapes}")
     print(f"  axes    : {data_store.axis_names}")
     print(f"  dtype   : {data_store.dtype}")
+    print(f"  scales  : {data_store.voxel_sizes}")
 
     # ── Depth range from world extents ───────────────────────────────────
     vox_shape = np.array(data_store.level_shapes[0], dtype=np.float64)
-    vs = np.array(voxel_scales, dtype=np.float64)
-    # Pad vs to match data dimensionality (prepend 1.0 if needed).
-    if len(vs) < len(vox_shape):
-        vs = np.concatenate([np.ones(len(vox_shape) - len(vs)), vs])
+    vs = np.array(data_store.voxel_sizes, dtype=np.float64)
     world_extents = vox_shape * vs
     max_extent = float(world_extents.max())
     near = max(1.0, max_extent * 0.0001)
@@ -203,7 +189,7 @@ def main() -> None:
     # ── Draw function (called each frame by QRenderWidget) ───────────────
     def draw_frame():
         if _camera_changed():
-            reslice_3d(visual, data_store, camera, renderer, canvas, slicer_obj)
+            reslice_3d(visual, data_store, camera, canvas, slicer_obj)
         renderer.render(scene, camera)
 
     canvas.request_draw(draw_frame)
@@ -211,7 +197,7 @@ def main() -> None:
     _last_cam_pos[0] = None  # already None; explicit for clarity
 
     # ── Qt side panel ────────────────────────────────────────────────────
-    panel = _build_panel(visual, data_store, camera, renderer, canvas, slicer_obj, voxel_scales)
+    panel = _build_panel(visual, data_store, camera, canvas, slicer_obj)
 
     win = QtWidgets.QWidget()
     win.setWindowTitle("demo_3d")
@@ -229,10 +215,8 @@ def _build_panel(
     visual,
     data_store,
     camera,
-    renderer,
     canvas,
     slicer_obj,
-    voxel_scales,
 ) -> QtWidgets.QWidget:
     panel = QtWidgets.QWidget()
     panel.setFixedWidth(220)
@@ -246,7 +230,7 @@ def _build_panel(
         f"Levels: {data_store.n_levels}\n"
         f"Axes: {' '.join(data_store.axis_names)}\n"
         f"Dtype: {data_store.dtype}\n"
-        f"Scales: {voxel_scales}\n"
+        f"Scales: {data_store.voxel_sizes}\n"
         f"clim: [{CLIM_LOW}, {CLIM_HIGH}]"
     )
     info.setWordWrap(True)
@@ -262,7 +246,7 @@ def _build_panel(
     def on_mode_change(value):
         if visual.material_3d is not None:
             visual.material_3d.render_mode = value
-        reslice_3d(visual, data_store, camera, renderer, canvas, slicer_obj)
+        reslice_3d(visual, data_store, camera, canvas, slicer_obj)
 
     mode_combo.currentTextChanged.connect(on_mode_change)
     layout.addWidget(render_group)

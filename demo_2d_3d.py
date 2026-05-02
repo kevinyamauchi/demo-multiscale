@@ -2,7 +2,7 @@
 
 Usage::
 
-    uv run demo_2d_3d.py --zarr-path /tmp/example.ome.zarr --voxel-scales 4.0 1.0 1.0
+    uv run demo_2d_3d.py --zarr-path /tmp/example.ome.zarr
 
 Controls:
     3-D mode:  orbit (left-drag), zoom (scroll), pan (right-drag)
@@ -186,7 +186,6 @@ def build_visual(
         full_level_transforms=list(level_transforms),
         gpu_budget_bytes_3d=GPU_BUDGET_3D_BYTES,
         gpu_budget_bytes_2d=GPU_BUDGET_2D_BYTES,
-        aabb_enabled=False,
     )
 
     return visual, spatial_axes, yx_axes, z_axis
@@ -195,17 +194,7 @@ def build_visual(
 def main() -> None:
     parser = argparse.ArgumentParser(description="2-D / 3-D multiscale viewer")
     parser.add_argument("--zarr-path", required=True)
-    parser.add_argument(
-        "--voxel-scales",
-        nargs="+",
-        type=float,
-        default=[1.0, 1.0, 1.0],
-        metavar="S",
-        help="Per-axis physical voxel size in ZYX data order",
-    )
     args = parser.parse_args()
-
-    voxel_scales_arg = args.voxel_scales
 
     # ── Load data store ──────────────────────────────────────────────────
     print(f"Opening: {args.zarr_path}")
@@ -213,12 +202,10 @@ def main() -> None:
     print(f"  levels : {data_store.n_levels}")
     print(f"  shapes : {data_store.level_shapes}")
     print(f"  axes   : {data_store.axis_names}")
+    print(f"  scales : {data_store.voxel_sizes}")
 
-    n_spatial = min(3, len(data_store.level_shapes[0]))
     vox_shape = np.array(data_store.level_shapes[0], dtype=np.float64)
-    vs_full = np.ones(len(vox_shape), dtype=np.float64)
-    vs_3 = np.array(voxel_scales_arg, dtype=np.float64)
-    vs_full[-3:] = vs_3[-3:]
+    vs_full = np.array(data_store.voxel_sizes, dtype=np.float64)
     voxel_scales_3d = list(vs_full[-3:])  # ZYX
 
     world_extents = vox_shape * vs_full
@@ -308,7 +295,7 @@ def main() -> None:
         f"Shape: {shape_str}\n"
         f"Levels: {data_store.n_levels}\n"
         f"Axes: {' '.join(data_store.axis_names)}\n"
-        f"Scales: {voxel_scales_3d}\n"
+        f"Scales: {data_store.voxel_sizes}\n"
         f"clim: [{CLIM_LOW}, {CLIM_HIGH}]"
     )
     info_label.setWordWrap(True)

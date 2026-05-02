@@ -35,7 +35,6 @@ from demo_multiscale.shaders._multiscale_volume_brick import (
     build_brick_scales_buffer,
     build_vol_params_buffer,
     compose_world_transform,
-    compute_normalized_size,
 )
 from demo_multiscale.transform import AffineTransform
 from demo_multiscale._frustum import (
@@ -69,55 +68,6 @@ import demo_multiscale.shaders._block_image as _image_reg  # noqa: F401
 import demo_multiscale.shaders._multiscale_volume_brick as _brick_reg  # noqa: F401
 
 
-# ---------------------------------------------------------------------------
-# Inlined wireframe / matrix helpers
-# ---------------------------------------------------------------------------
-
-
-def _box_wireframe_positions(box_min: np.ndarray, box_max: np.ndarray) -> np.ndarray:
-    x0, y0, z0 = float(box_min[0]), float(box_min[1]), float(box_min[2])
-    x1, y1, z1 = float(box_max[0]), float(box_max[1]), float(box_max[2])
-    return np.array(
-        [
-            [x0, y0, z0], [x1, y0, z0], [x1, y0, z0], [x1, y1, z0],
-            [x1, y1, z0], [x0, y1, z0], [x0, y1, z0], [x0, y0, z0],
-            [x0, y0, z1], [x1, y0, z1], [x1, y0, z1], [x1, y1, z1],
-            [x1, y1, z1], [x0, y1, z1], [x0, y1, z1], [x0, y0, z1],
-            [x0, y0, z0], [x0, y0, z1], [x1, y0, z0], [x1, y0, z1],
-            [x1, y1, z0], [x1, y1, z1], [x0, y1, z0], [x0, y1, z1],
-        ],
-        dtype=np.float32,
-    )
-
-
-def _rect_wireframe_positions(box_min: np.ndarray, box_max: np.ndarray) -> np.ndarray:
-    x0, y0 = float(box_min[0]), float(box_min[1])
-    x1, y1 = float(box_max[0]), float(box_max[1])
-    return np.array(
-        [
-            [x0, y0, 0.0], [x1, y0, 0.0], [x1, y0, 0.0], [x1, y1, 0.0],
-            [x1, y1, 0.0], [x0, y1, 0.0], [x0, y1, 0.0], [x0, y0, 0.0],
-        ],
-        dtype=np.float32,
-    )
-
-
-def _make_aabb_line(
-    positions: np.ndarray, color: str, line_width: float = 2.0
-) -> gfx.Line:
-    line = gfx.Line(
-        gfx.Geometry(positions=positions),
-        gfx.LineSegmentMaterial(color=color, thickness=line_width),
-    )
-    line.visible = False
-    return line
-
-
-# ---------------------------------------------------------------------------
-# Transform helpers
-# ---------------------------------------------------------------------------
-
-
 def _extract_scale_and_translation(
     level_transforms: list[AffineTransform],
 ) -> tuple[list[np.ndarray], list[np.ndarray]]:
@@ -128,11 +78,6 @@ def _extract_scale_and_translation(
         scale_vecs.append(np.diag(t.matrix[:nd, :nd]).copy())
         translation_vecs.append(t.matrix[:nd, nd].copy())
     return scale_vecs, translation_vecs
-
-
-# ---------------------------------------------------------------------------
-# VolumeGeometry
-# ---------------------------------------------------------------------------
 
 
 class VolumeGeometry:
@@ -185,11 +130,6 @@ class VolumeGeometry:
 
     def update(self, level_shapes: list[tuple[int, ...]]) -> None:
         self._rebuild(level_shapes)
-
-
-# ---------------------------------------------------------------------------
-# ImageGeometry2D
-# ---------------------------------------------------------------------------
 
 
 class ImageGeometry2D:
@@ -251,11 +191,6 @@ class ImageGeometry2D:
         )
 
 
-# ---------------------------------------------------------------------------
-# Coordinate helpers
-# ---------------------------------------------------------------------------
-
-
 def _brick_key_to_padded_coords(
     key: BlockKey3D,
     block_size: int,
@@ -306,11 +241,6 @@ def _build_axis_selections(
     return tuple(result)
 
 
-# ---------------------------------------------------------------------------
-# GFXMultiscaleImageVisual
-# ---------------------------------------------------------------------------
-
-
 class GFXMultiscaleImageVisual:
     """Demo render-layer visual for one multiscale image (no painting, no EventBus).
 
@@ -351,9 +281,6 @@ class GFXMultiscaleImageVisual:
         voxel_scales: list[float] | None = None,
         full_level_shapes: list[tuple[int, ...]] | None = None,
         full_level_transforms: list[AffineTransform] | None = None,
-        aabb_enabled: bool = False,
-        aabb_color: str = "#ffffff",
-        aabb_line_width: float = 2.0,
         render_order: int = 0,
         pick_write: bool = True,
     ) -> None:
@@ -409,16 +336,8 @@ class GFXMultiscaleImageVisual:
         self._pending_slot_map_2d: dict[UUID, tuple[BlockKey2D, TileSlot2D]] = {}
         self._last_plan_stats: dict = {}
 
-        self._data_ready_3d: bool = False
-        self._data_ready_2d: bool = False
-
-        self._aabb_enabled: bool = aabb_enabled
-        self._aabb_color: str = aabb_color
-        self._aabb_line_width: float = aabb_line_width
-
         self._current_slice_coord: tuple[tuple[int, int], ...] | None = None
 
-        # ── 3D GPU resources ────────────────────────────────────────────────
         self._block_cache_3d: BlockCache3D | None = None
         self._lut_manager_3d: LutIndirectionManager3D | None = None
         if volume_geometry is not None:
@@ -434,7 +353,6 @@ class GFXMultiscaleImageVisual:
                 level_scale_vecs_data=volume_geometry._scale_vecs_data,
             )
 
-        # ── 2D GPU resources ────────────────────────────────────────────────
         self._block_cache_2d: BlockCache2D | None = None
         self._lut_manager_2d: LutIndirectionManager2D | None = None
         self._lut_params_buffer_2d = None
@@ -457,7 +375,6 @@ class GFXMultiscaleImageVisual:
                 level_scale_vecs_data=image_geometry_2d._scale_vecs_data,
             )
 
-        # ── 3D brick shader buffers ─────────────────────────────────────────
         self._vol_params_buffer: Buffer | None = None
         self._brick_scales_buffer: Buffer | None = None
         self._norm_size: np.ndarray | None = None
@@ -484,12 +401,10 @@ class GFXMultiscaleImageVisual:
         if colormap is None:
             colormap = gfx.cm.viridis
 
-        # ── 3D node ─────────────────────────────────────────────────────────
         self.node_3d: gfx.Group | None = None
         self._inner_node_3d: gfx.Volume | None = None
         self.material_3d: MultiscaleVolumeBrickMaterial | None = None
         self._proxy_tex_3d: gfx.Texture | None = None
-        self._aabb_line_3d: gfx.Line | None = None
         if "3d" in render_modes and volume_geometry is not None:
             inner, self.material_3d, self._proxy_tex_3d = self._build_3d_node(
                 colormap=colormap,
@@ -500,15 +415,11 @@ class GFXMultiscaleImageVisual:
             self._inner_node_3d = inner
             self.node_3d = gfx.Group()
             self.node_3d.add(inner)
-            self._aabb_line_3d = self._build_aabb_line_3d()
-            self.node_3d.add(self._aabb_line_3d)
 
-        # ── 2D node ─────────────────────────────────────────────────────────
         self.node_2d: gfx.Group | None = None
         self._inner_node_2d: gfx.Image | None = None
         self.material_2d: ImageBlockMaterial | None = None
         self._proxy_tex_2d: gfx.Texture | None = None
-        self._aabb_line_2d: gfx.Line | None = None
         if "2d" in render_modes and image_geometry_2d is not None:
             inner, self.material_2d, self._proxy_tex_2d = self._build_2d_node(
                 colormap=colormap,
@@ -519,8 +430,6 @@ class GFXMultiscaleImageVisual:
             self._inner_node_2d = inner
             self.node_2d = gfx.Group()
             self.node_2d.add(inner)
-            self._aabb_line_2d = self._build_aabb_line_2d()
-            self.node_2d.add(self._aabb_line_2d)
 
         if self.node_3d is not None:
             self.node_3d.render_order = render_order
@@ -530,8 +439,6 @@ class GFXMultiscaleImageVisual:
         if self._last_displayed_axes is not None:
             self._update_node_matrix(self._last_displayed_axes)
 
-    # ── Properties ─────────────────────────────────────────────────────────
-
     @property
     def n_levels(self) -> int:
         if self._volume_geometry is not None:
@@ -540,15 +447,12 @@ class GFXMultiscaleImageVisual:
             return self._image_geometry_2d.n_levels
         raise RuntimeError("No geometry available")
 
-    # ── Node selection ──────────────────────────────────────────────────────
 
     def get_node_for_dims(self, displayed_axes: tuple[int, ...]) -> gfx.Group | None:
         _old_node, new_node = self.rebuild_geometry(
             self._full_level_shapes, displayed_axes
         )
         return new_node
-
-    # ── Geometry rebuild ────────────────────────────────────────────────────
 
     def rebuild_geometry(
         self,
@@ -604,10 +508,8 @@ class GFXMultiscaleImageVisual:
                 threshold=threshold,
             )
             self._inner_node_3d = inner
-            self._aabb_line_3d = self._build_aabb_line_3d()
             self.node_3d = gfx.Group()
             self.node_3d.add(inner)
-            self.node_3d.add(self._aabb_line_3d)
             if self._last_displayed_axes is not None:
                 self._update_node_matrix(self._last_displayed_axes)
         self._pending_slot_map = {}
@@ -634,10 +536,8 @@ class GFXMultiscaleImageVisual:
                 colormap=colormap, clim=clim, interpolation=interpolation
             )
             self._inner_node_2d = inner
-            self._aabb_line_2d = self._build_aabb_line_2d()
             self.node_2d = gfx.Group()
             self.node_2d.add(inner)
-            self.node_2d.add(self._aabb_line_2d)
             if self._last_displayed_axes is not None:
                 self._update_node_matrix(self._last_displayed_axes)
         self._pending_slot_map_2d = {}
@@ -667,8 +567,6 @@ class GFXMultiscaleImageVisual:
             inv_level = AffineTransform(matrix=lt.inverse_matrix)
             result.append(inv_level)
         return result
-
-    # ── 3D SliceCoordinator interface ───────────────────────────────────────
 
     def build_slice_request(
         self,
@@ -703,7 +601,7 @@ class GFXMultiscaleImageVisual:
             frustum_planes = None
 
 
-        # 1. LOD selection
+        # LOD selection
         if force_level is None and fov_y_rad > 0:
             focal_half_height_world = (screen_height_px / 2.0) / np.tan(fov_y_rad / 2.0)
             thresholds: list[float] | None = [
@@ -728,7 +626,7 @@ class GFXMultiscaleImageVisual:
             )
         lod_select_ms = (time.perf_counter() - t0) * 1000
 
-        # 2. Distance sort
+        # Distance sort
         t0 = time.perf_counter()
         brick_arr = sort_arr_by_distance(
             brick_arr,
@@ -740,7 +638,7 @@ class GFXMultiscaleImageVisual:
         distance_sort_ms = (time.perf_counter() - t0) * 1000
         n_total = len(brick_arr)
 
-        # 3. Frustum cull
+        # Frustum cull
         cull_timings: dict = {}
         n_culled = 0
         frustum_cull_ms = 0.0
@@ -756,14 +654,15 @@ class GFXMultiscaleImageVisual:
             frustum_cull_ms = (time.perf_counter() - t0) * 1000
             n_culled = n_total - len(brick_arr)
 
-        # 4. Budget truncation
+        # GPU Budget truncation
+        # (make sure there are not more bricks than cache slots)
         n_needed = len(brick_arr)
         n_budget = self._block_cache_3d.info.n_slots - 1
         n_dropped = max(0, n_needed - n_budget)
         if n_dropped:
             brick_arr = brick_arr[:n_budget]
 
-        # 5. Stage
+        # Stage
         t0 = time.perf_counter()
         sorted_required = arr_to_brick_keys(brick_arr)
         fill_plan = self._block_cache_3d.tile_manager.stage(
@@ -771,7 +670,7 @@ class GFXMultiscaleImageVisual:
         )
         stage_ms = (time.perf_counter() - t0) * 1000
 
-        # 6. Build ChunkRequests
+        # Build ChunkRequests
         slice_id = uuid4()
         chunk_requests: list[ChunkRequest] = []
         self._pending_slot_map = {}
@@ -805,7 +704,7 @@ class GFXMultiscaleImageVisual:
 
         plan_total_ms = (time.perf_counter() - t_plan_start) * 1000
 
-        self._last_plan_stats = stats = {
+        self._last_plan_stats = {
             "hits": len(sorted_required) - len(fill_plan),
             "misses": len(fill_plan),
             "total_required": n_total,
@@ -839,17 +738,11 @@ class GFXMultiscaleImageVisual:
 
         self._lut_manager_3d.rebuild(self._block_cache_3d.tile_manager)
 
-        if not self._data_ready_3d and self._aabb_line_3d is not None:
-            self._data_ready_3d = True
-            self._aabb_line_3d.visible = self._aabb_enabled
-
     def cancel_pending(self) -> None:
         if self._block_cache_3d is None:
             return
         self._block_cache_3d.tile_manager.release_all_in_flight()
         self._pending_slot_map = {}
-
-    # ── 2D SliceCoordinator interface ───────────────────────────────────────
 
     def build_slice_request_2d(
         self,
@@ -1039,10 +932,6 @@ class GFXMultiscaleImageVisual:
             current_slice_coord=self._current_slice_coord,
         )
 
-        if not self._data_ready_2d and self._aabb_line_2d is not None:
-            self._data_ready_2d = True
-            self._aabb_line_2d.visible = self._aabb_enabled
-
     def cancel_pending_2d(self) -> None:
         if self._block_cache_2d is None:
             return
@@ -1055,29 +944,6 @@ class GFXMultiscaleImageVisual:
         self.cancel_pending_2d()
 
     # ── Private helpers ─────────────────────────────────────────────────────
-
-    def _build_aabb_line_3d(self) -> gfx.Line:
-        if self._norm_size is not None:
-            half = self._norm_size / 2.0
-            positions = _box_wireframe_positions(-half, half)
-        else:
-            positions = _box_wireframe_positions(np.zeros(3), np.ones(3))
-        line = _make_aabb_line(positions, self._aabb_color, self._aabb_line_width)
-        line.visible = self._aabb_enabled
-        return line
-
-    def _build_aabb_line_2d(self) -> gfx.Line:
-        if self._image_geometry_2d is not None:
-            h, w = self._image_geometry_2d.level_shapes[0]
-            positions = _rect_wireframe_positions(
-                np.array([0.0, 0.0]),
-                np.array([float(w), float(h)]),
-            )
-        else:
-            positions = _rect_wireframe_positions(np.zeros(2), np.ones(2))
-        line = _make_aabb_line(positions, self._aabb_color, self._aabb_line_width)
-        line.visible = self._aabb_enabled
-        return line
 
     def _build_3d_node(
         self,

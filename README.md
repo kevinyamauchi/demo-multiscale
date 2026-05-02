@@ -11,5 +11,5 @@ uv run make_example_data.py --output example.ome.zarr --voxel-scales 4.0 1.0 1.0
 Then run the 3d viewer demo:
 
 ```sh
-uv run demo_3d.py --zarr-path ./example.ome.zarr --voxel-scales 4.0 1.0 1.0
+uv run demo_3d.py --zarr-path ./example.ome.zarr
 ```

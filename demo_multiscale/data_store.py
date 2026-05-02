@@ -215,7 +215,9 @@ def _derive_level_transforms(
     ms: v05.Multiscale,
     global_scale: list[float],
     global_translation: list[float],
-) -> list[AffineTransform]:
+) -> tuple[list[AffineTransform], list[float]]:
+    """Return (level_transforms, voxel_sizes) where voxel_sizes is the absolute
+    physical scale at the finest resolution level (level 0)."""
     n_axes = len(ms.axes)
 
     per_level: list[tuple[list[float], list[float]]] = []
@@ -236,7 +238,7 @@ def _derive_level_transforms(
                 scale=cellier_scale, translation=cellier_trans
             )
         )
-    return transforms
+    return transforms, list(s0)
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +254,7 @@ class OMEZarrImageDataStore(BaseDataStore):
     multiscale_index: int = 0
     scale_names: list[str]
     level_transforms: list[AffineTransform]
+    voxel_sizes: list[float]
     axis_names: list[str]
     axis_units: list[str | None]
     axis_types: list[str]
@@ -311,7 +314,7 @@ class OMEZarrImageDataStore(BaseDataStore):
 
         global_scale, global_translation = _extract_global_transform(ms)
 
-        level_transforms = _derive_level_transforms(
+        level_transforms, voxel_sizes = _derive_level_transforms(
             ms, global_scale, global_translation
         )
 
@@ -322,6 +325,7 @@ class OMEZarrImageDataStore(BaseDataStore):
             multiscale_index=multiscale_index,
             scale_names=scale_names,
             level_transforms=level_transforms,
+            voxel_sizes=voxel_sizes,
             axis_names=axis_names,
             axis_units=axis_units,
             axis_types=axis_types,
