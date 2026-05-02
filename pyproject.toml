@@ -1,0 +1,17 @@
+[project]
+name = "demo-multiscale"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.4.4",
+    "pydantic>=2.13.3",
+    "pygfx>=0.16.0",
+    "pyside6>=6.11.0",
+    "qtpy>=2.4.3",
+    "scipy>=1.17.1",
+    "tensorstore>=0.1.82",
+    "yaozarrs[io]>=0.3.0",
+    "zarr>=3.2.0",
+]
