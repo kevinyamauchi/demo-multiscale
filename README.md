@@ -1,5 +1,7 @@
 # Demo of multiscale chunked rendering with pygfx
 
+https://github.com/user-attachments/assets/3dffa013-4669-45c7-b358-e8e296ac4662
+
 ## Run demo
 
 To run the demo, first make some example data. This will make some gaussian blobs in a 125x500x500 volume, with voxel scales of 4x1x1 (ZxYxX). The data is written to `example.ome.zarr` in the current directory.
