@@ -30,11 +30,9 @@ popped once, so all operations are O(log N) amortised.
 from __future__ import annotations
 
 import heapq
-import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from demo_multiscale.logging import _CACHE_LOGGER
 
 if TYPE_CHECKING:
     from demo_multiscale.block_cache._cache_parameters_3d import (
@@ -187,21 +185,6 @@ class TileManager:
 
             fill_plan.append((brick_key, slot))
 
-        if _CACHE_LOGGER.isEnabledFor(logging.INFO):
-            n_hits = len(required_bricks) - len(miss_list)
-            n_occupied = len(self.tilemap)
-            n_total = self.cache_parameters.n_slots
-            _CACHE_LOGGER.info(
-                "cache_state  frame=%d  occupied=%d/%d  free=%d  "
-                "hits=%d  misses=%d  evictions=%d",
-                frame_number,
-                n_occupied,
-                n_total,
-                len(self.free_slots),
-                n_hits,
-                len(miss_list),
-                n_evictions,
-            )
 
         return fill_plan
 
@@ -280,7 +263,6 @@ class TileManager:
             # Valid LRU victim -- evict it.
             del self.tilemap[brick_key]
             self.slot_index[slot_idx] = None
-            _CACHE_LOGGER.debug("evict  victim=%s  slot=%d", brick_key, slot_idx)
             return slot_idx
 
         raise RuntimeError("_evict_lru: heap exhausted with no valid victim")
@@ -295,4 +277,3 @@ class TileManager:
         self.slot_index[0] = BlockKey3D(level=0, gz=0, gy=0, gx=0)
         self.free_slots = list(range(self.cache_parameters.n_slots - 1, 0, -1))
         self._lru_heap.clear()
-        _CACHE_LOGGER.info("cache_cleared  was_occupied=%d", was_occupied)

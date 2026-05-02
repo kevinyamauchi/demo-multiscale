@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING
 
 import numpy as np
 import pygfx as gfx
 
-from demo_multiscale.logging import _GPU_LOGGER
 
 if TYPE_CHECKING:
-    from demo_multiscale.block_cache._tile_manager import TileManager
+    from demo_multiscale.block_cache._tile_manager_3d import TileManager
     from demo_multiscale.lut_indirection._layout import BlockLayout3D
 
 
@@ -242,24 +240,6 @@ def rebuild_lut(
             # Single numpy slice assignment — fills the block at C speed.
             lut_data[gz0:gz1, gy0:gy1, gx0:gx1] = (sx, sy, sz, level)
             brick_max_data[gz0:gz1, gy0:gy1, gx0:gx1] = slot.brick_max
-
-    # Log per-level brick counts resident in LUT (np.unique scan is deferred
-    # behind the level check to avoid scanning the full array every batch).
-    if _GPU_LOGGER.isEnabledFor(logging.INFO):
-        lut_by_level = {level: len(bricks) for level, bricks in by_level.items()}
-        lut_level_vals, lut_level_counts = np.unique(
-            lut_data[:, :, :, 3], return_counts=True
-        )
-        lut_cells_by_level = {
-            int(lv): int(cnt)
-            for lv, cnt in zip(lut_level_vals, lut_level_counts)
-            if lv > 0
-        }
-        _GPU_LOGGER.info(
-            "rebuild_lut  resident_bricks_by_level=%s  lut_cells_by_level=%s",
-            lut_by_level,
-            lut_cells_by_level,
-        )
 
     lut_tex.update_range((0, 0, 0), lut_tex.size)
     brick_max_tex.update_range((0, 0, 0), brick_max_tex.size)

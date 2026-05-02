@@ -26,12 +26,10 @@ from rendercanvas.qt import QRenderWidget
 from demo_multiscale.data_store import OMEZarrImageDataStore
 from demo_multiscale.render_visual import (
     GFXMultiscaleImageVisual,
-    ImageGeometry2D,
     VolumeGeometry,
 )
 from demo_multiscale.slicer import AsyncSlicer
 from demo_multiscale.state import AxisAlignedSelectionState, DimsState
-from demo_multiscale.transform import AffineTransform
 
 # ---------------------------------------------------------------------------
 # Tunable constants (adjust per dataset / hardware)
@@ -268,13 +266,6 @@ def _build_panel(
 
     mode_combo.currentTextChanged.connect(on_mode_change)
     layout.addWidget(render_group)
-
-    # Reslice button
-    reslice_btn = QtWidgets.QPushButton("Reslice")
-    reslice_btn.clicked.connect(
-        lambda: reslice_3d(visual, data_store, camera, renderer, canvas, slicer_obj)
-    )
-    layout.addWidget(reslice_btn)
 
     layout.addStretch()
 

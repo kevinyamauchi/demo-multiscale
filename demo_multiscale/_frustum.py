@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from demo_multiscale._level_of_detail import CORNER_OFFSETS
+from demo_multiscale._level_of_detail_3d import CORNER_OFFSETS
 
 if TYPE_CHECKING:
     from demo_multiscale.block_cache import BlockKey3D

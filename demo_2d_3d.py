@@ -55,7 +55,6 @@ def reslice_3d(
     visual: GFXMultiscaleImageVisual,
     data_store: OMEZarrImageDataStore,
     camera: gfx.PerspectiveCamera,
-    renderer: gfx.WgpuRenderer,
     canvas,
     slicer: AsyncSlicer,
     axis_labels: tuple[str, ...],
@@ -96,7 +95,6 @@ def reslice_2d(
     visual: GFXMultiscaleImageVisual,
     data_store: OMEZarrImageDataStore,
     camera: gfx.OrthographicCamera,
-    renderer: gfx.WgpuRenderer,
     canvas,
     slicer: AsyncSlicer,
     axis_labels: tuple[str, ...],
@@ -266,12 +264,12 @@ def main() -> None:
     def reslice():
         if state["mode"] == "3d":
             reslice_3d(
-                visual, data_store, camera_3d, renderer, canvas, slicer_obj,
+                visual, data_store, camera_3d, canvas, slicer_obj,
                 axis_labels, spatial_axes,
             )
         else:
             reslice_2d(
-                visual, data_store, camera_2d, renderer, canvas, slicer_obj,
+                visual, data_store, camera_2d, canvas, slicer_obj,
                 axis_labels, yx_axes, z_axis, state["z_slice"],
             )
 
@@ -352,12 +350,6 @@ def main() -> None:
     z_spin.valueChanged.connect(
         lambda v: (state.update({"z_slice": v}), reslice())
     )
-
-    # Reslice button
-    reslice_btn = QtWidgets.QPushButton("Reslice")
-    reslice_btn.clicked.connect(reslice)
-    p_layout.addWidget(reslice_btn)
-    p_layout.addStretch()
 
     # Toggle handler
     def on_toggle():

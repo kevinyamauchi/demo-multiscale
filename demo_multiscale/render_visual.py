@@ -20,7 +20,6 @@ from demo_multiscale.block_cache._cache_parameters_2d import (
     compute_block_cache_parameters_2d,
 )
 from demo_multiscale.data_store import ChunkRequest
-from demo_multiscale.logging import _GPU_LOGGER, _PERF_LOGGER
 from demo_multiscale.lut_indirection import BlockLayout3D, LutIndirectionManager3D
 from demo_multiscale.lut_indirection._layout_2d import BlockLayout2D
 from demo_multiscale.lut_indirection._lut_buffers_2d import (
@@ -43,7 +42,7 @@ from demo_multiscale._frustum import (
     bricks_in_frustum_arr,
     frustum_planes_from_corners,
 )
-from demo_multiscale._level_of_detail import (
+from demo_multiscale._level_of_detail_3d import (
     arr_to_brick_keys,
     build_level_grids,
     select_levels_arr_forced,
@@ -703,12 +702,6 @@ class GFXMultiscaleImageVisual:
         else:
             frustum_planes = None
 
-        _PERF_LOGGER.debug(
-            "[frame %d]  camera_pos_world_xyz=%s  camera_pos_voxel_xyz=%s",
-            self._frame_number,
-            np.round(camera_pos_world, 1).tolist(),
-            np.round(camera_pos_data, 1).tolist(),
-        )
 
         # 1. LOD selection
         if force_level is None and fov_y_rad > 0:
@@ -827,19 +820,6 @@ class GFXMultiscaleImageVisual:
             "plan_total_ms": plan_total_ms,
         }
 
-        _PERF_LOGGER.info(
-            "[frame %d]  lod=%.1fms  sort=%.1fms  cull=%.1fms  stage=%.1fms"
-            "  |  req=%d  culled=%d  hits=%d  misses=%d",
-            self._frame_number,
-            stats["lod_select_ms"],
-            stats["distance_sort_ms"],
-            stats["frustum_cull_ms"],
-            stats["stage_ms"],
-            stats["total_required"],
-            stats["n_culled"],
-            stats["hits"],
-            stats["misses"],
-        )
 
         return chunk_requests
 
@@ -856,11 +836,6 @@ class GFXMultiscaleImageVisual:
             self._block_cache_3d.write_brick(slot, data, key=brick_key)
             self._block_cache_3d.tile_manager.commit(brick_key, slot)
 
-        _GPU_LOGGER.info(
-            "gpu_flush  bricks_in_batch=%d  resident=%d",
-            len(batch),
-            self._block_cache_3d.n_resident,
-        )
 
         self._lut_manager_3d.rebuild(self._block_cache_3d.tile_manager)
 
@@ -1043,19 +1018,6 @@ class GFXMultiscaleImageVisual:
             "plan_total_ms": plan_total_ms,
         }
 
-        _PERF_LOGGER.info(
-            "[frame %d]  lod=%.1fms  sort=%.1fms  cull=%.1fms  stage=%.1fms"
-            "  |  req=%d  culled=%d  hits=%d  misses=%d",
-            self._frame_number,
-            stats["lod_select_ms"],
-            stats["distance_sort_ms"],
-            stats["cull_ms"],
-            stats["stage_ms"],
-            stats["total_required"],
-            stats["n_culled"],
-            stats["hits"],
-            stats["misses"],
-        )
 
         return chunk_requests
 
@@ -1071,10 +1033,6 @@ class GFXMultiscaleImageVisual:
             self._block_cache_2d.write_tile(slot, data, key=tile_key)
             self._block_cache_2d.tile_manager.commit(tile_key, slot)
 
-        n_resident = len(self._block_cache_2d.tile_manager.tilemap)
-        _GPU_LOGGER.info(
-            "gpu_flush  tiles_in_batch=%d  resident=%d", len(batch), n_resident
-        )
 
         self._lut_manager_2d.rebuild(
             self._block_cache_2d.tile_manager,
@@ -1164,8 +1122,6 @@ class GFXMultiscaleImageVisual:
             lut_texture=self._lut_manager_2d.lut_tex,
             lut_params_buffer=self._lut_params_buffer_2d,
             block_scales_buffer=self._block_scales_buffer_2d,
-            paint_cache_texture=None,
-            paint_lut_texture=None,
             clim=clim,
             map=colormap,
             pick_write=pick_write,

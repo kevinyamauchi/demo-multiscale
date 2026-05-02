@@ -1,6 +1,5 @@
 import numpy as np
 
-from demo_multiscale.logging import _GPU_LOGGER
 from demo_multiscale.block_cache._cache_parameters_2d import (
     BlockCacheParameters2D,
     build_cache_texture_2d,
@@ -60,10 +59,4 @@ class BlockCache2D:
         self.cache_tex.update_range(
             offset=(x0, y0, 0),
             size=(pbs, pbs, 1),
-        )
-        _GPU_LOGGER.debug(
-            "brick_written  key=%s  slot=%d  grid_pos=%s",
-            key,
-            slot.index,
-            slot.grid_pos,
         )

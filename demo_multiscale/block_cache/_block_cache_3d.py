@@ -9,13 +9,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from demo_multiscale.logging import _GPU_LOGGER
 from demo_multiscale.block_cache._cache_parameters_3d import (
     BlockCacheParameters3D,
     build_cache_texture_3d,
     commit_block_3d,
 )
-from demo_multiscale.block_cache._tile_manager import (
+from demo_multiscale.block_cache._tile_manager_3d import (
     BlockKey3D,
     TileManager,
     TileSlot,
@@ -102,12 +101,6 @@ class BlockCache3D:
             grid_pos=slot.grid_pos,
             padded_block_size=self.info.padded_block_size,
             data=data,
-        )
-        _GPU_LOGGER.debug(
-            "brick_written  key=%s  slot=%d  grid_pos=%s",
-            key,
-            slot.index,
-            slot.grid_pos,
         )
 
     @property
