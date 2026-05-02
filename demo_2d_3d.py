@@ -14,6 +14,7 @@ Controls:
 from __future__ import annotations
 
 import argparse
+import collections
 import math
 import sys
 from uuid import uuid4
@@ -21,8 +22,9 @@ from uuid import uuid4
 import numpy as np
 import pygfx as gfx
 from qtpy import QtWidgets
-from qtpy.QtCore import Qt
+from qtpy.QtCore import Qt, QTimer
 from rendercanvas.qt import QRenderWidget
+from superqt import QLabeledDoubleRangeSlider, QLabeledDoubleSlider
 
 from demo_multiscale.data_store import OMEZarrImageDataStore
 from demo_multiscale.render_visual import (
@@ -37,13 +39,22 @@ from demo_multiscale.state import AxisAlignedSelectionState, DimsState
 # Tunable constants
 # ---------------------------------------------------------------------------
 
-CLIM_LOW: float = 0.0
-CLIM_HIGH: float = 1000.0
-ISO_THRESHOLD: float = 0.2
+INITIAL_CLIM_LOW: float = 0.0
+INITIAL_CLIM_HIGH: float = 1000.0
+INITIAL_ISO_THRESHOLD: float = 0.2
 LOD_BIAS: float = 1.0
 BLOCK_SIZE: int = 32
 GPU_BUDGET_3D_BYTES: int = 4096 * 1024**2
 GPU_BUDGET_2D_BYTES: int = 64 * 1024**2
+CHUNKS_PER_FRAME_3D: int = 32   # max GPU uploads per draw frame (3-D bricks)
+CHUNKS_PER_FRAME_2D: int = 64   # max GPU uploads per draw frame (2-D tiles, smaller)
+
+
+def _dtype_max(dtype: np.dtype) -> float:
+    """Return the maximum representable value for a numpy dtype."""
+    if np.issubdtype(dtype, np.integer):
+        return float(np.iinfo(dtype).max)
+    return float(np.finfo(dtype).max)
 
 
 # ---------------------------------------------------------------------------
@@ -59,9 +70,11 @@ def reslice_3d(
     slicer: AsyncSlicer,
     axis_labels: tuple[str, ...],
     spatial_axes: tuple[int, ...],
+    upload_queue: collections.deque,
     lod_bias: float = LOD_BIAS,
 ) -> None:
     visual.cancel_pending()
+    upload_queue.clear()  # drop any items queued for the previous reslice
 
     camera_pos = np.array(camera.world.position, dtype=np.float64)
     frustum_corners = np.asarray(camera.frustum, dtype=np.float64).copy()
@@ -85,8 +98,14 @@ def reslice_3d(
         dims_state=dims_state,
     )
 
+    slice_id = requests[0].slice_request_id if requests else None
+
     def on_batch(batch):
-        visual.on_data_ready(batch)
+        # Drop batches that were already in the Qt signal queue when a newer
+        # reslice superseded this one.
+        if slicer.current_slice_id != slice_id:
+            return
+        upload_queue.extend(batch)
 
     slicer.submit(requests, fetch_fn=data_store.get_data, callback=on_batch)
 
@@ -101,10 +120,12 @@ def reslice_2d(
     yx_axes: tuple[int, int],
     z_axis: int,
     z_slice: int,
+    upload_queue: collections.deque,
     lod_bias: float = LOD_BIAS,
 ) -> None:
     visual.cancel_pending_2d()
     visual.invalidate_2d_cache()
+    upload_queue.clear()  # drop any items queued for the previous reslice
 
     camera_pos = np.array(camera.world.position, dtype=np.float64)
     width_px, _height_px = canvas.get_logical_size()
@@ -128,8 +149,14 @@ def reslice_2d(
         lod_bias=lod_bias,
     )
 
+    slice_id = requests[0].slice_request_id if requests else None
+
     def on_batch(batch):
-        visual.on_data_ready_2d(batch)
+        # Drop batches that were already in the Qt signal queue when a newer
+        # reslice superseded this one.
+        if slicer.current_slice_id != slice_id:
+            return
+        upload_queue.extend(batch)
 
     slicer.submit(requests, fetch_fn=data_store.get_data, callback=on_batch)
 
@@ -179,8 +206,8 @@ def build_visual(
         render_modes={"2d", "3d"},
         displayed_axes=spatial_axes,
         colormap=gfx.cm.viridis,
-        clim=(CLIM_LOW, CLIM_HIGH),
-        threshold=ISO_THRESHOLD,
+        clim=(INITIAL_CLIM_LOW, INITIAL_CLIM_HIGH),
+        threshold=INITIAL_ISO_THRESHOLD,
         voxel_scales=voxel_scales,
         full_level_shapes=list(shapes),
         full_level_transforms=list(level_transforms),
@@ -243,6 +270,8 @@ def main() -> None:
     controller_2d.enabled = False
 
     slicer_obj = AsyncSlicer()
+    upload_queue_3d: collections.deque = collections.deque()
+    upload_queue_2d: collections.deque = collections.deque()
 
     # ── Shared mutable state ─────────────────────────────────────────────
     state = {"mode": "3d", "z_slice": z_depth // 2}
@@ -252,32 +281,60 @@ def main() -> None:
         if state["mode"] == "3d":
             reslice_3d(
                 visual, data_store, camera_3d, canvas, slicer_obj,
-                axis_labels, spatial_axes,
+                axis_labels, spatial_axes, upload_queue_3d,
             )
         else:
             reslice_2d(
                 visual, data_store, camera_2d, canvas, slicer_obj,
-                axis_labels, yx_axes, z_axis, state["z_slice"],
+                axis_labels, yx_axes, z_axis, state["z_slice"], upload_queue_2d,
             )
 
-    # ── Camera-change detection (compare state each frame) ───────────────
-    _last_cam_state = [None]
+    # ── Settle timer (debounce reslice until camera is still) ────────────
+    settle_ms = [150]
+
+    settle_timer = QTimer()
+    settle_timer.setSingleShot(True)
+    settle_timer.timeout.connect(reslice)
+
+    # ── View-change detection (compare state each frame) ─────────────────
+    _last_view_state: list[tuple[object, ...] | None] = [None]
 
     def _active_cam_state() -> tuple:
-        cam = camera_3d if state["mode"] == "3d" else camera_2d
-        return (tuple(cam.world.position), tuple(cam.world.rotation))
+        logical_size = tuple(canvas.get_logical_size())
+        if state["mode"] == "3d":
+            return (
+                "3d",
+                tuple(camera_3d.world.position),
+                tuple(camera_3d.world.rotation),
+                float(camera_3d.fov),
+                logical_size,
+            )
+        return (
+            "2d",
+            tuple(camera_2d.world.position),
+            tuple(camera_2d.world.rotation),
+            float(camera_2d.width),
+            float(camera_2d.height),
+            logical_size,
+        )
 
     def _camera_changed() -> bool:
         s = _active_cam_state()
-        if s != _last_cam_state[0]:
-            _last_cam_state[0] = s
+        if s != _last_view_state[0]:
+            _last_view_state[0] = s
             return True
         return False
 
     # ── Draw function (called each frame by QRenderWidget) ───────────────
     def draw_frame():
         if _camera_changed():
-            reslice()
+            settle_timer.start(settle_ms[0])
+        if upload_queue_3d:
+            drain = [upload_queue_3d.popleft() for _ in range(min(CHUNKS_PER_FRAME_3D, len(upload_queue_3d)))]
+            visual.on_data_ready(drain)
+        if upload_queue_2d:
+            drain = [upload_queue_2d.popleft() for _ in range(min(CHUNKS_PER_FRAME_2D, len(upload_queue_2d)))]
+            visual.on_data_ready_2d(drain)
         active_cam = camera_3d if state["mode"] == "3d" else camera_2d
         renderer.render(scene, active_cam)
 
@@ -295,11 +352,44 @@ def main() -> None:
         f"Shape: {shape_str}\n"
         f"Levels: {data_store.n_levels}\n"
         f"Axes: {' '.join(data_store.axis_names)}\n"
-        f"Scales: {data_store.voxel_sizes}\n"
-        f"clim: [{CLIM_LOW}, {CLIM_HIGH}]"
+        f"Scales: {data_store.voxel_sizes}"
     )
     info_label.setWordWrap(True)
     p_layout.addWidget(info_label)
+
+    dtype_max = _dtype_max(np.dtype(data_store.dtype))
+
+    # Contrast limits
+    clim_group = QtWidgets.QGroupBox("Contrast limits")
+    clim_layout = QtWidgets.QVBoxLayout(clim_group)
+    clim_slider = QLabeledDoubleRangeSlider(Qt.Horizontal)
+    clim_slider.setRange(0.0, dtype_max)
+    clim_slider.setValue((INITIAL_CLIM_LOW, INITIAL_CLIM_HIGH))
+
+    def on_clim_change(values: tuple[float, float]) -> None:
+        if visual.material_3d is not None:
+            visual.material_3d.clim = values
+        if visual.material_2d is not None:
+            visual.material_2d.clim = values
+
+    clim_slider.valueChanged.connect(on_clim_change)
+    clim_layout.addWidget(clim_slider)
+    p_layout.addWidget(clim_group)
+
+    # ISO threshold
+    threshold_group = QtWidgets.QGroupBox("ISO threshold")
+    threshold_layout = QtWidgets.QVBoxLayout(threshold_group)
+    threshold_slider = QLabeledDoubleSlider(Qt.Horizontal)
+    threshold_slider.setRange(0.0, dtype_max)
+    threshold_slider.setValue(INITIAL_ISO_THRESHOLD)
+
+    def on_threshold_change(value: float) -> None:
+        if visual.material_3d is not None:
+            visual.material_3d.threshold = value
+
+    threshold_slider.valueChanged.connect(on_threshold_change)
+    threshold_layout.addWidget(threshold_slider)
+    p_layout.addWidget(threshold_group)
 
     # Mode label
     mode_label = QtWidgets.QLabel("Mode: 3-D")
@@ -324,6 +414,20 @@ def main() -> None:
 
     mode_combo.currentTextChanged.connect(on_render_mode_change)
 
+    # Settle time
+    settle_group = QtWidgets.QGroupBox("Camera settle (ms)")
+    settle_layout = QtWidgets.QVBoxLayout(settle_group)
+    settle_spin = QtWidgets.QSpinBox()
+    settle_spin.setRange(0, 2000)
+    settle_spin.setValue(settle_ms[0])
+
+    def on_settle_change(v: int) -> None:
+        settle_ms[0] = v
+
+    settle_spin.valueChanged.connect(on_settle_change)
+    settle_layout.addWidget(settle_spin)
+    p_layout.addWidget(settle_group)
+
     # Z-slice spinner (2D only, initially hidden)
     z_group = QtWidgets.QGroupBox("Z slice")
     z_layout = QtWidgets.QVBoxLayout(z_group)
@@ -342,6 +446,8 @@ def main() -> None:
     def on_toggle():
         visual.cancel_pending()
         visual.cancel_pending_2d()
+        settle_timer.stop()
+        _last_view_state[0] = None
 
         if state["mode"] == "3d":
             state["mode"] = "2d"
