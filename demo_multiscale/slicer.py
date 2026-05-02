@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
@@ -45,6 +46,7 @@ class _BatchRelay(QObject):
 
     def _on_deliver(self, payload: object) -> None:
         callback, batch = payload  # type: ignore[misc]
+        print(f"[RELAY] delivering batch of {len(batch)} chunks on main thread")
         callback(batch)
 
 
@@ -74,10 +76,18 @@ class AsyncSlicer:
     ) -> None:
         self._batch_size = batch_size
         self._executor = ThreadPoolExecutor(max_workers=max_workers or batch_size)
-        # Per-slice cancellation flags.
-        self._cancel_events: dict[UUID, threading.Event] = {}
+        # Single generation event: setting it cancels ALL currently running threads.
+        # Each submit() replaces it with a fresh Event, giving the new thread its own
+        # clean flag while all previous threads see their shared event become set.
+        self._cancel_event: threading.Event = threading.Event()
+        self._current_slice_id: UUID | None = None
         # Relay for posting batch results onto the Qt main thread.
         self._relay = _BatchRelay()
+
+    @property
+    def current_slice_id(self) -> UUID | None:
+        """The slice_request_id of the most recently submitted job."""
+        return self._current_slice_id
 
     # ── Public API ──────────────────────────────────────────────────────
 
@@ -112,13 +122,21 @@ class AsyncSlicer:
 
         slice_id = requests[0].slice_request_id
 
-        # Signal any running thread for this slice to stop.
-        old_event = self._cancel_events.pop(slice_id, None)
-        if old_event is not None:
-            old_event.set()
+        # Cancel ALL currently running threads by setting the current event.
+        # Each running thread holds a reference to the event that was current
+        # when it started, so setting it here signals all of them at once.
+        old_event = self._cancel_event
+        was_running = not old_event.is_set()
+        old_event.set()
+        print(f"[SLICER] submit: {'cancelling running work' if was_running else 'no running work'}, "
+              f"new slice_id={slice_id!s:.8}")
 
+        # Fresh event for this generation only.
         cancel_event = threading.Event()
-        self._cancel_events[slice_id] = cancel_event
+        self._cancel_event = cancel_event
+        self._current_slice_id = slice_id
+        print(f"[SLICER] submit: starting new thread, {len(requests)} requests, "
+              f"slice_id={slice_id!s:.8}")
 
         thread = threading.Thread(
             target=self._run,
@@ -129,24 +147,21 @@ class AsyncSlicer:
 
         return slice_id
 
-    def cancel(self, slice_request_id: UUID | None) -> bool:
-        """Cancel in-flight work for ``slice_request_id``.
-
-        No-op if the ID is unknown or the thread has already finished.
+    def cancel(self) -> bool:
+        """Cancel all in-flight work.
 
         Returns
         -------
         cancelled :
             ``True`` if a running thread was found and signalled;
-            ``False`` otherwise.
+            ``False`` if nothing was running.
         """
-        if slice_request_id is None:
-            return False
-        event = self._cancel_events.pop(slice_request_id, None)
-        if event is not None:
-            event.set()
-            return True
-        return False
+        old_event = self._cancel_event
+        was_running = not old_event.is_set()
+        old_event.set()
+        self._cancel_event = threading.Event()
+        self._current_slice_id = None
+        return was_running
 
     # ── Internal worker ─────────────────────────────────────────────────
 
@@ -172,13 +187,20 @@ class AsyncSlicer:
             requests[i : i + self._batch_size]
             for i in range(0, len(requests), self._batch_size)
         ]
+        n_batches = len(batches)
+        t_start = time.perf_counter()
+        print(f"[THREAD] start slice_id={slice_id!s:.8}, "
+              f"{len(requests)} chunks in {n_batches} batches, "
+              f"thread={threading.current_thread().name}")
 
         cancelled = False
 
         try:
-            for batch in batches:
+            for i, batch in enumerate(batches):
                 if cancel_event.is_set():
                     cancelled = True
+                    print(f"[THREAD] cancelled (pre-fetch) at batch {i}/{n_batches}, "
+                          f"slice_id={slice_id!s:.8}")
                     break
 
                 results: list[np.ndarray] = list(
@@ -187,10 +209,16 @@ class AsyncSlicer:
 
                 if cancel_event.is_set():
                     cancelled = True
+                    print(f"[THREAD] cancelled (post-fetch) at batch {i}/{n_batches}, "
+                          f"slice_id={slice_id!s:.8}")
                     break
 
                 self._relay.post(callback, list(zip(batch, results)))
 
         finally:
-            self._cancel_events.pop(slice_id, None)
+            elapsed_ms = (time.perf_counter() - t_start) * 1000
+            status = "CANCELLED" if cancelled else "done"
+            print(f"[THREAD] {status} slice_id={slice_id!s:.8}, "
+                  f"elapsed={elapsed_ms:.0f}ms, "
+                  f"thread={threading.current_thread().name}")
 
