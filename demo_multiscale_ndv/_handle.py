@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 
     from ndv.models._lut_model import ClimPolicy
 
+    from demo_multiscale_ndv.render_visual import MultiscaleBrickLayout2D, MultiscaleBrickLayout3D
+
 # Sorted tuple of (axis_index, slice_value) pairs encoding the sliced axes.
 SliceCoord = tuple[tuple[int, int], ...]
 
@@ -48,6 +50,14 @@ class MultiscaleVolumeHandle(CanvasElement, LUTView):
     @abstractmethod
     def cache_query(self) -> CacheQuery:
         """Return the cache-query adapter for the current frame."""
+
+    @property
+    @abstractmethod
+    def brick_layout(self) -> MultiscaleBrickLayout3D: ...
+
+    @abstractmethod
+    def advance_frame(self) -> None:
+        """Increment the LRU frame counter for this frame's cache queries."""
 
     @abstractmethod
     def expand_fetch_index(
@@ -141,6 +151,14 @@ class MultiscaleImageHandle(CanvasElement, LUTView):
     @abstractmethod
     def cache_query(self) -> CacheQuery2D:
         """Return the cache-query adapter for the current frame."""
+
+    @property
+    @abstractmethod
+    def brick_layout(self) -> MultiscaleBrickLayout2D: ...
+
+    @abstractmethod
+    def advance_frame(self) -> None:
+        """Increment the LRU frame counter for this frame's cache queries."""
 
     @abstractmethod
     def expand_fetch_index(

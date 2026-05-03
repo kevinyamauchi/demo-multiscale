@@ -44,7 +44,7 @@ from demo_multiscale_ndv.shaders._multiscale_volume_brick import (
 if TYPE_CHECKING:
     import cmap as _cmap
 
-    from demo_multiscale_ndv.render_visual import ImageGeometry2D, VolumeGeometry
+    from demo_multiscale_ndv.render_visual import MultiscaleBrickLayout2D, MultiscaleBrickLayout3D
 
 # Register shader render functions with pygfx.
 import demo_multiscale_ndv.shaders._block_image as _image_reg  # noqa: F401
@@ -205,7 +205,7 @@ class GFXMultiscaleVolumeHandle(MultiscaleVolumeHandle):
 
     def __init__(
         self,
-        volume_geometry: VolumeGeometry,
+        volume_geometry: MultiscaleBrickLayout3D,
         voxel_scales: np.ndarray,
         gpu_budget_bytes: int = 1 * 1024**3,
         overlap: int = 3,
@@ -216,6 +216,7 @@ class GFXMultiscaleVolumeHandle(MultiscaleVolumeHandle):
     ) -> None:
         self._voxel_scales = np.asarray(voxel_scales, dtype=np.float64)
         self.frame_number: int = 0
+        self._brick_layout = volume_geometry
 
         if colormap is None:
             colormap = gfx.cm.viridis
@@ -238,7 +239,7 @@ class GFXMultiscaleVolumeHandle(MultiscaleVolumeHandle):
 
     def _build_from_geometry(
         self,
-        geometry: VolumeGeometry,
+        geometry: MultiscaleBrickLayout3D,
         colormap: gfx.TextureMap,
         clim: tuple[float, float],
         threshold: float,
@@ -299,7 +300,7 @@ class GFXMultiscaleVolumeHandle(MultiscaleVolumeHandle):
 
     # ── rebuild for geometry changes ────────────────────────────────────
 
-    def rebuild(self, geometry: VolumeGeometry) -> None:
+    def rebuild(self, geometry: MultiscaleBrickLayout3D) -> None:
         """Reinitialize LUT, buffers, and pygfx node for new level shapes."""
         self._block_cache.tile_manager.release_all_in_flight()
         self._pending_writes.clear()
@@ -335,6 +336,13 @@ class GFXMultiscaleVolumeHandle(MultiscaleVolumeHandle):
         self.node.local.matrix = m
 
     # ── MultiscaleVolumeHandle abstract methods ─────────────────────────
+
+    @property
+    def brick_layout(self) -> MultiscaleBrickLayout3D:
+        return self._brick_layout
+
+    def advance_frame(self) -> None:
+        self.frame_number += 1
 
     def set_brick(self, slot: SlotId, data: np.ndarray) -> None:
         entry = self._pending_writes.get(slot)
@@ -436,7 +444,7 @@ class GFXMultiscaleImageHandle(MultiscaleImageHandle):
 
     def __init__(
         self,
-        image_geometry_2d: ImageGeometry2D,
+        image_geometry_2d: MultiscaleBrickLayout2D,
         voxel_scales: np.ndarray,
         gpu_budget_bytes: int = 64 * 1024**2,
         overlap: int = 1,
@@ -447,6 +455,7 @@ class GFXMultiscaleImageHandle(MultiscaleImageHandle):
     ) -> None:
         self._voxel_scales = np.asarray(voxel_scales, dtype=np.float64)
         self.frame_number: int = 0
+        self._brick_layout = image_geometry_2d
 
         if colormap is None:
             colormap = gfx.cm.viridis
@@ -471,7 +480,7 @@ class GFXMultiscaleImageHandle(MultiscaleImageHandle):
 
     def _build_from_geometry(
         self,
-        geometry: ImageGeometry2D,
+        geometry: MultiscaleBrickLayout2D,
         colormap: gfx.TextureMap,
         clim: tuple[float, float],
         interpolation: str,
@@ -497,7 +506,7 @@ class GFXMultiscaleImageHandle(MultiscaleImageHandle):
 
     def _make_node(
         self,
-        geometry: ImageGeometry2D,
+        geometry: MultiscaleBrickLayout2D,
         colormap: gfx.TextureMap,
         clim: tuple[float, float],
         interpolation: str,
@@ -527,7 +536,7 @@ class GFXMultiscaleImageHandle(MultiscaleImageHandle):
 
     # ── rebuild for geometry changes ────────────────────────────────────
 
-    def rebuild(self, geometry: ImageGeometry2D) -> None:
+    def rebuild(self, geometry: MultiscaleBrickLayout2D) -> None:
         """Reinitialize LUT, buffers, and pygfx node for new level shapes."""
         self._block_cache.tile_manager.release_all_in_flight()
         self._pending_writes.clear()
@@ -562,6 +571,13 @@ class GFXMultiscaleImageHandle(MultiscaleImageHandle):
         self.node.local.matrix = m
 
     # ── MultiscaleImageHandle abstract methods ──────────────────────────
+
+    @property
+    def brick_layout(self) -> MultiscaleBrickLayout2D:
+        return self._brick_layout
+
+    def advance_frame(self) -> None:
+        self.frame_number += 1
 
     def set_brick(self, slot: SlotId, data: np.ndarray) -> None:
         entry = self._pending_writes.get(slot)

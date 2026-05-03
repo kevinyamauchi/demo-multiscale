@@ -28,19 +28,23 @@ from superqt import QLabeledDoubleRangeSlider, QLabeledDoubleSlider
 from ndv.models._array_display_model import ArrayDisplayModel
 from ndv.models._resolve import ResolvedDisplayState, resolve
 
-from demo_multiscale_ndv._camera_view import camera_view_from_gfx_2d, camera_view_from_gfx_3d
+from demo_multiscale_ndv._camera_view import CameraView2D, CameraView3D, camera_view_from_gfx_2d, camera_view_from_gfx_3d
+from demo_multiscale_ndv._handle import MultiscaleImageHandle, MultiscaleVolumeHandle
 from demo_multiscale_ndv._ome_zarr_wrapper import OMEZarrDataWrapper
-from demo_multiscale_ndv._plan_slice import plan_slice_2d, plan_slice_3d
+from demo_multiscale_ndv._plan_slice import (
+    build_fetch_requests_2d,
+    build_fetch_requests_3d,
+    select_visible_bricks_2d,
+    select_visible_bricks_3d,
+)
 from demo_multiscale_ndv.render_visual import (
     GFXMultiscaleImageVisual,
-    ImageGeometry2D,
-    VolumeGeometry,
+    MultiscaleBrickLayout2D,
+    MultiscaleBrickLayout3D,
 )
 from demo_multiscale_ndv.slicer import AsyncSlicer
+from demo_multiscale_ndv.transform import AffineTransform
 
-# ---------------------------------------------------------------------------
-# Tunable constants
-# ---------------------------------------------------------------------------
 
 INITIAL_CLIM_LOW: float = 0.0
 INITIAL_CLIM_HIGH: float = 1000.0
@@ -62,58 +66,85 @@ def _dtype_max(dtype: np.dtype) -> float:
     return float(np.finfo(dtype).max)
 
 
-# ---------------------------------------------------------------------------
-# Reslice helpers
-# ---------------------------------------------------------------------------
-
-
 def reslice_3d(
-    visual: GFXMultiscaleImageVisual,
+    volume_handle: MultiscaleVolumeHandle,
     wrapper: OMEZarrDataWrapper,
-    camera: gfx.PerspectiveCamera,
-    canvas,
+    camera_view: CameraView3D,
     slicer: AsyncSlicer,
     resolved: ResolvedDisplayState,
     upload_queue: collections.deque,
     lod_bias: float = LOD_BIAS,
 ) -> None:
-    """Plan and submit 3-D brick requests.
+    """Plan and submit asynchronous 3-D brick requests for the current view.
 
-    The 3-D planner emits core brick indices and delegates overlap expansion to
-    ``volume_handle.expand_fetch_index``. Result batches are filtered by
-    ``slice_id`` before appending into ``upload_queue``.
+    Cancels any pending work, selects visible bricks for the current camera
+    view, allocates GPU cache slots for cache misses, and submits the resulting
+    fetch requests to the asynchronous slicer. Completed batches are appended
+    to ``upload_queue`` for later GPU upload by the draw loop.
+
+    Parameters
+    ----------
+    volume_handle : MultiscaleVolumeHandle
+        Handle that owns the 3-D GPU cache and accepts brick writes.
+    wrapper : OMEZarrDataWrapper
+        Multiscale data source used to load each requested chunk.
+    camera_view : CameraView3D
+        Frozen snapshot of the perspective camera (position, frustum, FOV).
+    slicer : AsyncSlicer
+        Background loader that executes chunk reads and posts completed
+        batches back to the Qt thread.
+    resolved : ResolvedDisplayState
+        Resolved ndv display state describing the visible axes and any fixed
+        indices for non-visible axes.
+    upload_queue : collections.deque
+        Receives completed ``(request, data)`` pairs until the draw loop
+        drains and uploads them to the GPU.
+    lod_bias : float, optional
+        Scale applied to LOD thresholds. Values > 1 favour coarser levels;
+        values < 1 favour finer levels.
     """
-    visual.cancel_pending()
+    # Discard any in-flight requests and queued uploads from the previous frame.
+    volume_handle.invalidate_pending()
     upload_queue.clear()
 
-    camera_view = camera_view_from_gfx_3d(camera, canvas)
-    visual.begin_frame_3d(resolved.visible_axes)
-    volume_handle = visual.volume_handle
+    # Advance the LRU frame counter so cache residency checks this frame use
+    # a consistent timestamp.
+    volume_handle.advance_frame()
 
-    requests, _ = plan_slice_3d(
-        camera_view=camera_view,
-        cache_query=volume_handle.cache_query(),
-        geo=visual.volume_geometry,
-        voxel_scales=visual.voxel_scales,
-        full_level_shapes=visual.full_level_shapes,
-        world_to_level_transforms=visual.world_to_level_transforms,
-        expand_fetch_index=volume_handle.expand_fetch_index,
-        resolved=resolved,
-        lod_bias=lod_bias,
+    # Derive ZYX voxel scales from the wrapper (full nD scales, take last 3).
+    # this will have to be done properly using the resolved display state.
+    voxel_scales = np.asarray(wrapper.voxel_sizes, dtype=np.float64)[-3:]
+
+    # Pure selection: choose and prioritize visible bricks based on camera
+    # position, frustum, and LOD thresholds. No cache interaction here.
+    sorted_block_keys = select_visible_bricks_3d(
+        camera_view,
+        volume_handle.brick_layout,
+        voxel_scales,
+        lod_bias,
     )
 
+    # Build inverse level transforms (world → level-k data coordinates) needed
+    # to map non-displayed axis indices into each resolution level.
+    world_to_level = [AffineTransform(matrix=t.inverse_matrix) for t in wrapper.level_transforms]
+
+    # Cache-aware pass: skip resident bricks, allocate slots for misses, and
+    # assemble MultiscaleChunkRequest objects ready for the slicer.
+    requests = build_fetch_requests_3d(
+        sorted_block_keys,
+        volume_handle.brick_layout.block_size,
+        volume_handle.cache_query(),
+        resolved,
+        list(wrapper.level_shapes),
+        world_to_level,
+        volume_handle.expand_fetch_index,
+    )
+
+    # Capture the slice ID so the callback can drop stale batches if a newer
+    # reslice supersedes this one before results arrive.
     slice_id = requests[0].slice_request_id if requests else None
 
     def on_batch(batch):
-        """Handle one loaded batch for the current 2-D slice request.
-
-        This callback is invoked by ``AsyncSlicer`` on the Qt main thread after a
-        batch of tile reads completes. It ignores results from an outdated slice by
-        checking that the captured ``slice_id`` still matches
-        ``slicer.current_slice_id``. Valid results are appended to ``upload_queue``
-        so ``_draw_frame()`` can apply them to the 2-D visual in bounded per-frame
-        uploads.
-        """
         if slicer.current_slice_id != slice_id:
             return
         upload_queue.extend(batch)
@@ -126,65 +157,111 @@ def reslice_3d(
 
 
 def reslice_2d(
-    visual: GFXMultiscaleImageVisual,
+    image_handle: MultiscaleImageHandle,
     wrapper: OMEZarrDataWrapper,
-    camera: gfx.OrthographicCamera,
-    canvas,
+    camera_view: CameraView2D,
     slicer: AsyncSlicer,
     resolved: ResolvedDisplayState,
     upload_queue: collections.deque,
     lod_bias: float = LOD_BIAS,
 ) -> tuple[tuple[int, int], ...]:
-    """Plan and submit 2-D tile requests.
+    """Plan and submit asynchronous 2-D tile requests for the current slice.
 
-    Returns the slice_coord used for this reslice so the caller can pass it to
-    ``visual.on_data_ready_2d`` when draining the upload queue.
+    Cancels any pending work, selects visible tiles for the current camera
+    view and slice position, evicts tiles from finer LOD levels that are no
+    longer needed, allocates GPU cache slots for cache misses, and submits the
+    resulting fetch requests to the asynchronous slicer. Completed batches are
+    appended to ``upload_queue`` for later GPU upload by the draw loop.
+
+    Parameters
+    ----------
+    image_handle : MultiscaleImageHandle
+        Handle that owns the 2-D GPU cache and accepts tile writes.
+    wrapper : OMEZarrDataWrapper
+        Multiscale data source used to load each requested chunk.
+    camera_view : CameraView2D
+        Frozen snapshot of the orthographic camera (bounds, viewport size).
+    slicer : AsyncSlicer
+        Background loader that executes chunk reads and posts completed
+        batches back to the Qt thread.
+    resolved : ResolvedDisplayState
+        Resolved ndv display state describing the visible axes and any fixed
+        indices for non-visible axes.
+    upload_queue : collections.deque
+        Receives completed ``(request, data)`` pairs until the draw loop
+        drains and uploads them to the GPU.
+    lod_bias : float, optional
+        Scale applied to LOD thresholds. Values > 1 favour coarser levels;
+        values < 1 favour finer levels.
+
+    Returns
+    -------
+    tuple of tuple of int
+        Sorted ``(axis, index)`` pairs encoding the current non-visible axis
+        positions. The caller passes this to ``on_data_ready_2d`` so uploaded
+        tiles are committed into the correct 2-D slice cache entry.
     """
-    visual.cancel_pending_2d()
-    visual.invalidate_2d_cache()
+    # Discard any in-flight requests and queued uploads from the previous frame.
+    image_handle.invalidate_pending()
     upload_queue.clear()
 
-    camera_view = camera_view_from_gfx_2d(camera, canvas)
-
+    # Derive a stable cache key for the current slice position: sorted
+    # (axis, index) pairs for all non-displayed integer axes.
     visible = set(resolved.visible_axes)
     slice_coord: tuple[tuple[int, int], ...] = tuple(sorted(
         (ax, v) for ax, v in resolved.current_index.items()
         if isinstance(v, int) and ax not in visible
     ))
 
-    visual.begin_frame_2d(resolved.visible_axes)
-    image_handle = visual.image_handle
+    # Advance the LRU frame counter so cache residency checks this frame use
+    # a consistent timestamp.
+    image_handle.advance_frame()
 
-    requests, _, target_level = plan_slice_2d(
-        camera_view=camera_view,
-        cache_query=image_handle.cache_query(),
-        geo=visual.image_geometry_2d,
-        voxel_scales=visual.voxel_scales,
-        full_level_shapes=visual.full_level_shapes,
-        world_to_level_transforms=visual.world_to_level_transforms,
-        resolved=resolved,
-        current_slice_coord=slice_coord,
-        expand_fetch_index=image_handle.expand_fetch_index,
-        lod_bias=lod_bias,
-        use_culling=True,
+    # Derive ZYX voxel scales from the wrapper (full nD scales, take last 3).
+    # this will have to be done properly using the resolved display state.
+    voxel_scales = np.asarray(wrapper.voxel_sizes, dtype=np.float64)[-3:]
+
+    # View selection: choose and prioritize visible tiles based on camera
+    # bounds, LOD thresholds, and viewport culling. No cache interaction here.
+    required_block_keys, target_level = select_visible_bricks_2d(
+        camera_view,
+        image_handle.brick_layout,
+        voxel_scales,
+        slice_coord,
+        lod_bias,
     )
 
+    # Remove tiles at finer resolution than the current target level; they
+    # would be immediately superseded and waste cache slots.
     n_evicted = image_handle.evict_finer_than(target_level)
+
+    # Build inverse level transforms (world → level-k data coordinates) needed
+    # to map non-displayed axis indices into each resolution level.
+    world_to_level = [AffineTransform(matrix=t.inverse_matrix) for t in wrapper.level_transforms]
+
+    # Cache-aware pass: skip resident tiles, allocate slots for misses, and
+    # assemble MultiscaleChunkRequest objects ready for the slicer.
+    requests = build_fetch_requests_2d(
+        required_block_keys,
+        slice_coord,
+        image_handle.cache_query(),
+        resolved,
+        list(wrapper.level_shapes),
+        world_to_level,
+        image_handle.expand_fetch_index,
+        image_handle.brick_layout.block_size,
+    )
+
+    # If evictions changed the cache but no new fetches are needed, rebuild
+    # the LUT immediately so the display reflects the evictions right away.
     if n_evicted > 0 and not requests:
         image_handle.rebuild_lut(slice_coord)
 
+    # Capture the slice ID so the callback can drop stale batches if a newer
+    # reslice supersedes this one before results arrive.
     slice_id = requests[0].slice_request_id if requests else None
 
     def on_batch(batch):
-        """Handle one loaded batch for the current 2-D slice request.
-
-        This callback is invoked by ``AsyncSlicer`` on the Qt main thread after a
-        batch of tile reads completes. It ignores results from an outdated slice by
-        checking that the captured ``slice_id`` still matches
-        ``slicer.current_slice_id``. Valid results are appended to ``upload_queue``
-        so ``_draw_frame()`` can apply them to the 2-D visual in bounded per-frame
-        uploads.
-        """
         if slicer.current_slice_id != slice_id:
             return
         upload_queue.extend(batch)
@@ -223,13 +300,13 @@ def build_visual(
     transforms_3d = [t.set_slice(spatial_axes) for t in level_transforms]
     transforms_2d = [t.set_slice(yx_axes) for t in level_transforms]
 
-    volume_geometry = VolumeGeometry(
+    volume_geometry = MultiscaleBrickLayout3D(
         level_shapes=shapes_3d,
         level_transforms=transforms_3d,
         block_size=BLOCK_SIZE,
     )
 
-    image_geometry_2d = ImageGeometry2D(
+    image_geometry_2d = MultiscaleBrickLayout2D(
         level_shapes=shapes_2d,
         block_size=BLOCK_SIZE,
         n_levels=wrapper.n_levels,
@@ -247,7 +324,6 @@ def build_visual(
         threshold=INITIAL_ISO_THRESHOLD,
         voxel_scales=voxel_scales,
         full_level_shapes=list(shapes),
-        full_level_transforms=list(level_transforms),
         gpu_budget_bytes_3d=GPU_BUDGET_3D_BYTES,
         gpu_budget_bytes_2d=GPU_BUDGET_2D_BYTES,
         overlap_3d=OVERLAP_3D,
@@ -404,27 +480,29 @@ class Viewer(QtWidgets.QWidget):
     def _reslice(self) -> None:
         if self.mode == "3d":
             resolved = resolve(self.display_model_3d, self.wrapper)
+            self.visual.update_display_axes(resolved.visible_axes)
+            camera_view = camera_view_from_gfx_3d(self.camera_3d, self.canvas)
             reslice_3d(
-                self.visual,
-                self.wrapper,
-                self.camera_3d,
-                self.canvas,
-                self.slicer_obj,
-                resolved,
-                self.upload_queue_3d,
+                volume_handle=self.visual.volume_handle,
+                wrapper=self.wrapper,
+                camera_view=camera_view,
+                slicer=self.slicer_obj,
+                resolved=resolved,
+                upload_queue=self.upload_queue_3d,
             )
             return
 
         self.display_model_2d.current_index[self.z_axis] = self.z_slice
         resolved = resolve(self.display_model_2d, self.wrapper)
+        self.visual.update_display_axes(resolved.visible_axes)
+        camera_view = camera_view_from_gfx_2d(self.camera_2d, self.canvas)
         self.slice_coord_2d = reslice_2d(
-            self.visual,
-            self.wrapper,
-            self.camera_2d,
-            self.canvas,
-            self.slicer_obj,
-            resolved,
-            self.upload_queue_2d,
+            image_handle=self.visual.image_handle,
+            wrapper=self.wrapper,
+            camera_view=camera_view,
+            slicer=self.slicer_obj,
+            resolved=resolved,
+            upload_queue=self.upload_queue_2d,
         )
 
     def _active_cam_state(self) -> tuple[object, ...]:
@@ -493,8 +571,10 @@ class Viewer(QtWidgets.QWidget):
         self._reslice()
 
     def _on_toggle(self) -> None:
-        self.visual.cancel_pending()
-        self.visual.cancel_pending_2d()
+        if self.visual.volume_handle is not None:
+            self.visual.volume_handle.invalidate_pending()
+        if self.visual.image_handle is not None:
+            self.visual.image_handle.invalidate_pending()
         self.settle_timer.stop()
         self._last_view_state = None
 

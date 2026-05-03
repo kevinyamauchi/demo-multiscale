@@ -35,9 +35,6 @@ from demo_multiscale.render_visual import (
 from demo_multiscale.slicer import AsyncSlicer
 from demo_multiscale.state import AxisAlignedSelectionState, DimsState
 
-# ---------------------------------------------------------------------------
-# Tunable constants
-# ---------------------------------------------------------------------------
 
 INITIAL_CLIM_LOW: float = 0.0
 INITIAL_CLIM_HIGH: float = 1000.0
@@ -57,22 +54,73 @@ def _dtype_max(dtype: np.dtype) -> float:
     return float(np.finfo(dtype).max)
 
 
-# ---------------------------------------------------------------------------
-# Reslice helpers
-# ---------------------------------------------------------------------------
-
-
 def reslice_3d(
     visual: GFXMultiscaleImageVisual,
     data_store: OMEZarrImageDataStore,
     camera: gfx.PerspectiveCamera,
-    canvas,
+    canvas: QRenderWidget,
     slicer: AsyncSlicer,
     axis_labels: tuple[str, ...],
     spatial_axes: tuple[int, ...],
     upload_queue: collections.deque,
     lod_bias: float = LOD_BIAS,
 ) -> None:
+    """Plan and submit asynchronous 3-D brick requests for the current view.
+
+    This helper snapshots the active perspective camera, builds a temporary
+    dimension-selection state for the displayed spatial axes, and asks the
+    multiscale visual to produce the brick requests needed for the current
+    view. Any previously pending 3-D work is cancelled before the new request
+    set is submitted to the asynchronous slicer.
+
+    Parameters
+    ----------
+    visual : GFXMultiscaleImageVisual
+        Visual responsible for planning 3-D brick requests and later accepting
+        uploaded brick data.
+    data_store : OMEZarrImageDataStore
+        Backing multiscale data source. Its ``get_data`` method is used to
+        synchronously fetch each requested chunk inside the slicer worker
+        threads.
+    camera : gfx.PerspectiveCamera
+        Active 3-D camera. Its world position, frustum corners, and field of
+        view are used to choose visible bricks and the appropriate resolution
+        level.
+    canvas : QRenderWidget
+        Render canvas that provides ``get_logical_size()`` so the planner can
+        incorporate the current viewport height.
+    slicer : AsyncSlicer
+        Background batch loader that executes chunk reads and posts completed
+        batches back to the Qt thread.
+    axis_labels : tuple of str
+        Full data-axis labels used to construct the temporary ``DimsState`` for
+        the request planner.
+    spatial_axes : tuple of int
+        Data-axis indices currently displayed in 3-D, typically the spatial
+        ``(z, y, x)`` axes.
+    upload_queue : collections.deque
+        Queue that receives completed ``(request, data)`` pairs until the draw
+        loop drains them and uploads them to the GPU.
+    lod_bias : float, default=LOD_BIAS
+        Bias applied to level-of-detail selection. Larger values favor coarser
+        levels, while smaller values favor finer levels.
+
+    Returns
+    -------
+    None
+        This function updates internal planning state and enqueues future data
+        uploads but does not return a value.
+
+    Notes
+    -----
+    Before submitting new work, this function cancels any pending 3-D requests
+    on ``visual`` and clears ``upload_queue`` so stale uploads are discarded.
+    The callback captures the newly generated ``slice_request_id`` and ignores
+    any completed batch whose identifier no longer matches
+    ``slicer.current_slice_id``. That prevents late-arriving results from an
+    older camera view from being uploaded after a newer reslice has already
+    started.
+    """
     visual.cancel_pending()
     upload_queue.clear()  # drop any items queued for the previous reslice
 
@@ -114,7 +162,7 @@ def reslice_2d(
     visual: GFXMultiscaleImageVisual,
     data_store: OMEZarrImageDataStore,
     camera: gfx.OrthographicCamera,
-    canvas,
+    canvas: QRenderWidget,
     slicer: AsyncSlicer,
     axis_labels: tuple[str, ...],
     yx_axes: tuple[int, int],
@@ -123,6 +171,64 @@ def reslice_2d(
     upload_queue: collections.deque,
     lod_bias: float = LOD_BIAS,
 ) -> None:
+    """Plan and submit asynchronous 2-D tile requests for one orthogonal slice.
+
+    This helper resets the 2-D planning state, captures the active
+    orthographic-camera view, fixes the requested slice index for the hidden
+    axis, and asks the multiscale visual to produce the tile requests needed
+    for the current 2-D view. The resulting requests are executed
+    asynchronously, with completed batches appended to ``upload_queue`` for
+    later GPU upload in the draw loop.
+
+    Parameters
+    ----------
+    visual : GFXMultiscaleImageVisual
+        Visual responsible for planning 2-D tile requests, invalidating stale
+        2-D cache state, and later accepting uploaded tile data.
+    data_store : OMEZarrImageDataStore
+        Backing multiscale data source. Its ``get_data`` method is used by the
+        asynchronous slicer to load each tile request.
+    camera : gfx.OrthographicCamera
+        Active 2-D camera. Its world position and width determine the current
+        view center and the resolution level chosen for the slice.
+    canvas : QRenderWidget
+        Render canvas that provides ``get_logical_size()`` so the planner can
+        use the current viewport width in pixels.
+    slicer : AsyncSlicer
+        Background batch loader that executes tile reads and posts completed
+        batches back to the Qt thread.
+    axis_labels : tuple of str
+        Full data-axis labels used to construct the temporary ``DimsState`` for
+        the request planner.
+    yx_axes : tuple of int
+        Data-axis indices displayed in 2-D mode, ordered as row and column
+        axes.
+    z_axis : int
+        Data-axis index orthogonal to the displayed plane.
+    z_slice : int
+        Integer slice position to sample along ``z_axis``.
+    upload_queue : collections.deque
+        Queue that receives completed ``(request, data)`` pairs until the draw
+        loop drains them and uploads them to the GPU.
+    lod_bias : float, default=LOD_BIAS
+        Bias applied to level-of-detail selection. Larger values favor coarser
+        levels, while smaller values favor finer levels.
+
+    Returns
+    -------
+    None
+        This function updates internal planning state and enqueues future data
+        uploads but does not return a value.
+
+    Notes
+    -----
+    The 2-D cache state is reset by calling ``visual.cancel_pending_2d()`` and
+    ``visual.invalidate_2d_cache()`` before planning the next slice. The
+    generated ``DimsState`` marks ``yx_axes`` as visible and fixes ``z_axis`` to
+    ``z_slice``. As in the 3-D path, the completion callback filters batches by
+    ``slice_request_id`` so results queued on the Qt signal loop from an older
+    slice do not overwrite the current view.
+    """
     visual.cancel_pending_2d()
     visual.invalidate_2d_cache()
     upload_queue.clear()  # drop any items queued for the previous reslice

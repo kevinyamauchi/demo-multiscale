@@ -16,10 +16,6 @@ from demo_multiscale_ndv.transform import AffineTransform
 from demo_multiscale_ndv._level_of_detail_3d import build_level_grids
 from demo_multiscale_ndv._level_of_detail_2d import build_tile_grids_2d
 
-from ndv.models._resolve import ResolvedDisplayState
-
-from demo_multiscale_ndv._camera_view import CameraView2D, CameraView3D
-
 if TYPE_CHECKING:
     from pygfx.resources import Buffer
 
@@ -41,7 +37,7 @@ def _extract_scale_and_translation(
     return scale_vecs, translation_vecs
 
 
-class VolumeGeometry:
+class MultiscaleBrickLayout3D:
     """Pre-built metadata cache for a multiscale 3-D volume."""
 
     def __init__(
@@ -93,7 +89,7 @@ class VolumeGeometry:
         self._rebuild(level_shapes)
 
 
-class ImageGeometry2D:
+class MultiscaleBrickLayout2D:
     """Pre-built metadata cache for a multiscale 2-D image."""
 
     def __init__(
@@ -159,9 +155,9 @@ class GFXMultiscaleImageVisual:
     ----------
     visual_model_id : UUID
         Opaque identifier for this visual.
-    volume_geometry : VolumeGeometry or None
+    volume_geometry : MultiscaleBrickLayout3D or None
         Pre-built 3-D metadata cache.
-    image_geometry_2d : ImageGeometry2D or None
+    image_geometry_2d : MultiscaleBrickLayout2D or None
         Pre-built 2-D metadata cache.
     render_modes : set[str]
         Which nodes to build: ``{"3d"}``, ``{"2d"}``, or ``{"2d", "3d"}``.
@@ -174,8 +170,6 @@ class GFXMultiscaleImageVisual:
         for each axis if not provided.
     full_level_shapes : list[tuple[int, ...]] or None
         Full nD shapes for each level (needed for non-displayed axis mapping).
-    full_level_transforms : list[AffineTransform] or None
-        Full nD level transforms (level-k → level-0 in data order).
     """
 
     cancellable: bool = True
@@ -183,8 +177,8 @@ class GFXMultiscaleImageVisual:
     def __init__(
         self,
         visual_model_id: UUID,
-        volume_geometry: VolumeGeometry | None,
-        image_geometry_2d: ImageGeometry2D | None,
+        volume_geometry: MultiscaleBrickLayout3D | None,
+        image_geometry_2d: MultiscaleBrickLayout2D | None,
         render_modes: set[str],
         displayed_axes: tuple[int, ...] | None = None,
         colormap: gfx.TextureMap | None = None,
@@ -197,7 +191,6 @@ class GFXMultiscaleImageVisual:
         overlap_2d: int = 1,
         voxel_scales: list[float] | None = None,
         full_level_shapes: list[tuple[int, ...]] | None = None,
-        full_level_transforms: list[AffineTransform] | None = None,
         render_order: int = 0,
         pick_write: bool = True,
     ) -> None:
@@ -221,15 +214,6 @@ class GFXMultiscaleImageVisual:
         self._volume_geometry = volume_geometry
         self._image_geometry_2d = image_geometry_2d
 
-        if full_level_transforms is not None:
-            self._level_transforms = list(full_level_transforms)
-        elif volume_geometry is not None:
-            self._level_transforms = volume_geometry.level_transforms
-        elif image_geometry_2d is not None:
-            self._level_transforms = image_geometry_2d.level_transforms
-        else:
-            self._level_transforms = []
-
         if full_level_shapes is not None:
             self._full_level_shapes = list(full_level_shapes)
         elif volume_geometry is not None:
@@ -239,10 +223,7 @@ class GFXMultiscaleImageVisual:
         else:
             self._full_level_shapes = []
 
-        self._world_to_level_transforms = self._build_world_to_level_transforms()
-
         self._last_displayed_axes: tuple[int, ...] | None = displayed_axes
-        self._frame_number = 0
         self._last_plan_stats: dict = {}
 
         if colormap is None:
@@ -314,20 +295,8 @@ class GFXMultiscaleImageVisual:
         return self._volume_handle
 
     @property
-    def volume_geometry(self) -> VolumeGeometry | None:
+    def volume_geometry(self) -> MultiscaleBrickLayout3D | None:
         return self._volume_geometry
-
-    def begin_frame_3d(self, visible_axes: tuple[int, ...]) -> None:
-        """Advance the LRU frame counter and sync scene-node axes if needed.
-
-        Must be called once per reslice, before ``volume_handle.cache_query()``
-        is used, so the LRU timestamps are consistent within a single frame.
-        """
-        self._frame_number += 1
-        if self._volume_handle is not None:
-            self._volume_handle.frame_number = self._frame_number
-        if visible_axes != self._last_displayed_axes:
-            self._update_node_matrix(visible_axes)
 
     # ── Public 2-D planning surface ─────────────────────────────────────
 
@@ -336,30 +305,11 @@ class GFXMultiscaleImageVisual:
         return self._image_handle
 
     @property
-    def image_geometry_2d(self) -> ImageGeometry2D | None:
+    def image_geometry_2d(self) -> MultiscaleBrickLayout2D | None:
         return self._image_geometry_2d
 
-    @property
-    def voxel_scales(self) -> np.ndarray:
-        return self._voxel_scales
-
-    @property
-    def full_level_shapes(self) -> list[tuple[int, ...]]:
-        return self._full_level_shapes
-
-    @property
-    def world_to_level_transforms(self) -> list[AffineTransform]:
-        return self._world_to_level_transforms
-
-    def begin_frame_2d(self, visible_axes: tuple[int, ...]) -> None:
-        """Advance the LRU frame counter and sync scene-node axes if needed.
-
-        Must be called once per reslice, before ``image_handle.cache_query()``
-        is used, so the LRU timestamps are consistent within a single frame.
-        """
-        self._frame_number += 1
-        if self._image_handle is not None:
-            self._image_handle.frame_number = self._frame_number
+    def update_display_axes(self, visible_axes: tuple[int, ...]) -> None:
+        """Update the scene-node world transform if the displayed axes changed."""
         if visible_axes != self._last_displayed_axes:
             self._update_node_matrix(visible_axes)
 
@@ -424,12 +374,6 @@ class GFXMultiscaleImageVisual:
         if self._image_handle is not None:
             self._image_handle.apply_world_transform()
 
-    def _build_world_to_level_transforms(self) -> list[AffineTransform]:
-        result: list[AffineTransform] = []
-        for lt in self._level_transforms:
-            result.append(AffineTransform(matrix=lt.inverse_matrix))
-        return result
-
     # ── 3-D upload ──────────────────────────────────────────────────────
 
     def on_data_ready(
@@ -441,11 +385,6 @@ class GFXMultiscaleImageVisual:
                 continue
             self._volume_handle.set_brick(req.slot_id, data)
         self._volume_handle.commit()
-
-    def cancel_pending(self) -> None:
-        if self._volume_handle is None:
-            return
-        self._volume_handle.invalidate_pending()
 
     # ── 2-D upload ──────────────────────────────────────────────────────
 
@@ -459,13 +398,3 @@ class GFXMultiscaleImageVisual:
                 continue
             self._image_handle.set_brick(req.slot_id, data)
         self._image_handle.commit(slice_coord)
-
-    def cancel_pending_2d(self) -> None:
-        if self._image_handle is None:
-            return
-        self._image_handle.invalidate_pending()
-
-    def invalidate_2d_cache(self) -> None:
-        if self._image_handle is None:
-            return
-        self.cancel_pending_2d()
