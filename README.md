@@ -36,4 +36,7 @@ Then view it with:
 uv run demo_2d_3d_viewer.py --zarr-path ExpA_VIP_ASLM_on.zarr
 ```
 
-The movie above was recorded with iso_thresold=300 and camera_settle=150 (ms). The camera settle time sets how long the camera state has to be constant before reslicing the scene. This is important to keep the viewer responsive when moving around the scene quickly. 
+The movie above was recorded with iso_thresold=300 and camera_settle=150 (ms). The camera settle time sets how long the camera state has to be constant before reslicing the scene. This is important to keep the viewer responsive when moving around the scene quickly.
+
+## ndv demo
+To understand if it would be possible to implement this in ndv, I made a version of the demo that tries to use the ndv architecture/API as much as possible (`demo_2d_3d_ndv.py` and `demo_multiscale_ndv`). You can run it with the same commands as above.
