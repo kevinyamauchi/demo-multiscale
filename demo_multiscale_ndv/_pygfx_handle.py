@@ -11,6 +11,7 @@ import pygfx as gfx
 from demo_multiscale_ndv._cache_query import CacheQuery, CacheQuery2D, SlotId
 from demo_multiscale_ndv._data_wrapper import BrickKey
 from demo_multiscale_ndv._handle import MultiscaleImageHandle, MultiscaleVolumeHandle, SliceCoord
+from demo_multiscale_ndv._indexing import IndexSpec
 from demo_multiscale_ndv.block_cache import (
     BlockCache3D,
     BlockKey3D,
@@ -190,6 +191,8 @@ class GFXMultiscaleVolumeHandle(MultiscaleVolumeHandle):
         Physical voxel sizes in data-axis order (z, y, x).
     gpu_budget_bytes :
         Maximum GPU memory for the brick cache.
+    overlap :
+        Border overlap in voxels added on each side of fetched bricks.
     colormap :
         Initial pygfx colormap (TextureMap).
     clim :
@@ -205,6 +208,7 @@ class GFXMultiscaleVolumeHandle(MultiscaleVolumeHandle):
         volume_geometry: VolumeGeometry,
         voxel_scales: np.ndarray,
         gpu_budget_bytes: int = 1 * 1024**3,
+        overlap: int = 3,
         colormap: gfx.TextureMap | None = None,
         clim: tuple[float, float] = (0.0, 1.0),
         threshold: float = 0.5,
@@ -219,8 +223,9 @@ class GFXMultiscaleVolumeHandle(MultiscaleVolumeHandle):
         cache_params = compute_block_cache_parameters_3d(
             block_size=volume_geometry.block_size,
             gpu_budget_bytes=gpu_budget_bytes,
-            overlap=3,
+            overlap=overlap,
         )
+        self._overlap = int(overlap)
         self._block_cache = BlockCache3D(cache_params)
         self._cache_query_adapter = _CacheQueryAdapter3D(self)
 
@@ -354,9 +359,32 @@ class GFXMultiscaleVolumeHandle(MultiscaleVolumeHandle):
     def cache_query(self) -> CacheQuery:
         return self._cache_query_adapter
 
-    @property
-    def overlap(self) -> int:
-        return self._block_cache.info.overlap
+    def expand_fetch_index(
+        self,
+        level: int,
+        core_index: IndexSpec,
+        level_shape: tuple[int, ...],
+        current_slice_coord: SliceCoord,
+    ) -> IndexSpec:
+        """Expand core 3-D fetch slices by the cache overlap.
+
+        We intentionally do not clamp to bounds; the data wrapper is expected
+        to zero-pad out-of-bounds regions so fetched bricks keep fixed padded
+        dimensions required by the 3-D cache texture.
+        """
+        del level, current_slice_coord
+        expanded = dict(core_index)
+        ov = self._overlap
+        if ov <= 0:
+            return expanded
+
+        for ax, sel in core_index.items():
+            if isinstance(sel, slice):
+                start = 0 if sel.start is None else int(sel.start)
+                stop = int(level_shape[ax]) if sel.stop is None else int(sel.stop)
+                expanded[ax] = slice(start - ov, stop + ov)
+
+        return expanded
 
     # ── LUTView stub implementations ────────────────────────────────────
 
@@ -394,6 +422,8 @@ class GFXMultiscaleImageHandle(MultiscaleImageHandle):
         Physical voxel sizes in data-axis order (z, y, x).
     gpu_budget_bytes :
         Maximum GPU memory for the tile cache.
+    overlap :
+        Border overlap in pixels added on each side of fetched tiles.
     colormap :
         Initial pygfx colormap (TextureMap).
     clim :
@@ -409,6 +439,7 @@ class GFXMultiscaleImageHandle(MultiscaleImageHandle):
         image_geometry_2d: ImageGeometry2D,
         voxel_scales: np.ndarray,
         gpu_budget_bytes: int = 64 * 1024**2,
+        overlap: int = 1,
         colormap: gfx.TextureMap | None = None,
         clim: tuple[float, float] = (0.0, 1.0),
         interpolation: str = "nearest",
@@ -423,7 +454,9 @@ class GFXMultiscaleImageHandle(MultiscaleImageHandle):
         cache_params = compute_block_cache_parameters_2d(
             gpu_budget_bytes=gpu_budget_bytes,
             block_size=image_geometry_2d.block_size,
+            overlap=overlap,
         )
+        self._overlap = int(overlap)
         self._block_cache = BlockCache2D(cache_params)
         self._cache_query_adapter = _CacheQueryAdapter2D(self)
 
@@ -555,9 +588,26 @@ class GFXMultiscaleImageHandle(MultiscaleImageHandle):
     def cache_query(self) -> CacheQuery2D:
         return self._cache_query_adapter
 
-    @property
-    def overlap(self) -> int:
-        return self._block_cache.info.overlap
+    def expand_fetch_index(
+        self,
+        level: int,
+        core_index: IndexSpec,
+        level_shape: tuple[int, ...],
+        current_slice_coord: SliceCoord,
+    ) -> IndexSpec:
+        del level, current_slice_coord
+        expanded = dict(core_index)
+        ov = self._overlap
+        if ov <= 0:
+            return expanded
+
+        for ax, sel in core_index.items():
+            if isinstance(sel, slice):
+                start = 0 if sel.start is None else int(sel.start)
+                stop = int(level_shape[ax]) if sel.stop is None else int(sel.stop)
+                expanded[ax] = slice(start - ov, stop + ov)
+
+        return expanded
 
     def evict_finer_than(self, target_level: int) -> int:
         return self._block_cache.tile_manager.evict_finer_than(target_level)

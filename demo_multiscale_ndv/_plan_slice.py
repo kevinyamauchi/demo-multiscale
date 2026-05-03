@@ -1,9 +1,10 @@
 """Pure planning functions: plan_slice_3d, plan_slice_2d.
 
-These functions contain all brick/tile selection, LOD, frustum-culling, and
-cache-query logic.  They are free of GPU side-effects and do not touch the
-scene graph; callers are responsible for submitting the returned requests to
-the slicer and uploading results via the handle.
+These functions contain all brick/tile selection, LOD, culling, and cache-query
+logic. They are free of GPU side-effects and do not touch the scene graph.
+
+Both planners compute *core* fetch indices (no overlap/halo) and delegate
+backend-specific fetch expansion to ``expand_fetch_index`` callbacks.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from demo_multiscale_ndv._frustum import (
     bricks_in_frustum_arr,
     frustum_planes_from_corners,
 )
+from demo_multiscale_ndv._indexing import ExpandFetchIndex
 from demo_multiscale_ndv._level_of_detail_2d import (
     arr_to_block_keys_2d,
     select_lod_2d,
@@ -46,27 +48,25 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
-def _brick_key_to_padded_coords(
+def _brick_key_to_core_coords(
     key,
     block_size: int,
-    overlap: int,
 ) -> tuple[int, int, int, int, int, int]:
-    padded = block_size + 2 * overlap
-    z0 = key.gz * block_size - overlap
-    y0 = key.gy * block_size - overlap
-    x0 = key.gx * block_size - overlap
-    return z0, y0, x0, z0 + padded, y0 + padded, x0 + padded
+    """Return core (non-overlapped) zyx bounds for one brick key."""
+    z0 = key.gz * block_size
+    y0 = key.gy * block_size
+    x0 = key.gx * block_size
+    return z0, y0, x0, z0 + block_size, y0 + block_size, x0 + block_size
 
 
-def _block_key_2d_to_padded_coords(
+def _block_key_2d_to_core_coords(
     key,
     block_size: int,
-    overlap: int,
 ) -> tuple[int, int, int, int]:
-    padded = block_size + 2 * overlap
-    y0 = key.gy * block_size - overlap
-    x0 = key.gx * block_size - overlap
-    return y0, x0, y0 + padded, x0 + padded
+    """Return core (non-overlapped) yx bounds for one tile key."""
+    y0 = key.gy * block_size
+    x0 = key.gx * block_size
+    return y0, x0, y0 + block_size, x0 + block_size
 
 
 def _build_axis_selections(
@@ -109,12 +109,16 @@ def plan_slice_3d(
     voxel_scales: np.ndarray,
     full_level_shapes: list[tuple[int, ...]],
     world_to_level_transforms: list[AffineTransform],
-    overlap: int,
+    expand_fetch_index: ExpandFetchIndex,
     resolved: ResolvedDisplayState | None = None,
     lod_bias: float = 1.0,
     force_level: int | None = None,
 ) -> tuple[list[MultiscaleChunkRequest], dict[str, Any]]:
-    """Select bricks, assign cache slots, return requests ready for submission.
+    """Select bricks, assign cache slots, and build fetch-ready requests.
+
+    The planner computes core data-space brick indices (no overlap/halo).
+    Backend-specific fetch expansion (halo, borders, filter footprint) is
+    delegated to ``expand_fetch_index``.
 
     Parameters
     ----------
@@ -130,8 +134,9 @@ def plan_slice_3d(
         Full nD shapes for each resolution level.
     world_to_level_transforms :
         Inverse of each level's affine transform (world → level-k).
-    overlap :
-        Brick overlap in voxels (added on each side).
+    expand_fetch_index :
+        Callback that converts core brick indices into backend-specific
+        fetch indices (e.g. overlap/halo expansion).
     resolved :
         ndv resolved display state; supplies visible axes and slice indices.
         If ``None``, all data axes are treated as display axes.
@@ -246,9 +251,7 @@ def plan_slice_3d(
         slot_id = cache_query.allocate_slot(bk)
         n_misses += 1
         chunk_id = uuid4()
-        z0, y0, x0, z1, y1, x1 = _brick_key_to_padded_coords(
-            block_key, geo.block_size, overlap
-        )
+        z0, y0, x0, z1, y1, x1 = _brick_key_to_core_coords(block_key, geo.block_size)
         level_index = block_key.level - 1
         display_coords = [(z0, z1), (y0, y1), (x0, x1)]
         if resolved is not None:
@@ -262,10 +265,16 @@ def plan_slice_3d(
             )
         else:
             axis_selections = tuple(display_coords)
-        index = {
+        core_index = {
             ax_i: sel if isinstance(sel, int) else slice(sel[0], sel[1])
             for ax_i, sel in enumerate(axis_selections)
         }
+        index = expand_fetch_index(
+            level_index,
+            core_index,
+            full_level_shapes[level_index],
+            (),
+        )
         chunk_requests.append(MultiscaleChunkRequest(
             chunk_request_id=chunk_id,
             slice_request_id=slice_id,
@@ -307,14 +316,18 @@ def plan_slice_2d(
     voxel_scales: np.ndarray,
     full_level_shapes: list[tuple[int, ...]],
     world_to_level_transforms: list[AffineTransform],
-    overlap: int,
     resolved: ResolvedDisplayState,
     current_slice_coord: tuple[tuple[int, int], ...],
+    expand_fetch_index: ExpandFetchIndex,
     lod_bias: float = 1.0,
     force_level: int | None = None,
     use_culling: bool = True,
 ) -> tuple[list[MultiscaleChunkRequest], dict[str, Any], int]:
-    """Select tiles, assign cache slots, return requests ready for submission.
+    """Select tiles, assign cache slots, and build fetch-ready requests.
+
+    The planner computes core data-space tile indices (no overlap/halo).
+    Backend-specific fetch expansion (halo, borders, filter footprint) is
+    delegated to ``expand_fetch_index``.
 
     Parameters
     ----------
@@ -330,13 +343,14 @@ def plan_slice_2d(
         Full nD shapes for each resolution level.
     world_to_level_transforms :
         Inverse of each level's affine transform (world → level-k).
-    overlap :
-        Tile overlap in voxels (added on each side).
     resolved :
         ndv resolved display state; supplies visible axes and slice indices.
     current_slice_coord :
         Sorted ``((axis, value), ...)`` tuple encoding the current slice
         position (used as part of the tile cache key).
+    expand_fetch_index :
+        Callback that converts core tile indices into backend-specific
+        fetch indices (e.g. overlap/halo expansion).
     lod_bias :
         Scale applied to LOD thresholds (> 1 → coarser, < 1 → finer).
     force_level :
@@ -460,7 +474,7 @@ def plan_slice_2d(
         slot_id = cache_query.allocate_slot(bk, current_slice_coord)
         n_misses += 1
         chunk_id = uuid4()
-        y0, x0, y1, x1 = _block_key_2d_to_padded_coords(tile_key, geo.block_size, overlap)
+        y0, x0, y1, x1 = _block_key_2d_to_core_coords(tile_key, geo.block_size)
         level_index = tile_key.level - 1
         display_coords = [(y0, y1), (x0, x1)]
         axis_selections = _build_axis_selections(
@@ -471,10 +485,16 @@ def plan_slice_2d(
             level_shape=full_level_shapes[level_index],
             world_to_level_k=world_to_level_transforms[level_index],
         )
-        index = {
+        core_index = {
             ax_i: sel if isinstance(sel, int) else slice(sel[0], sel[1])
             for ax_i, sel in enumerate(axis_selections)
         }
+        index = expand_fetch_index(
+            level_index,
+            core_index,
+            full_level_shapes[level_index],
+            current_slice_coord,
+        )
         chunk_requests.append(MultiscaleChunkRequest(
             chunk_request_id=chunk_id,
             slice_request_id=slice_id,

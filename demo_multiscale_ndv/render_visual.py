@@ -165,6 +165,10 @@ class GFXMultiscaleImageVisual:
         Pre-built 2-D metadata cache.
     render_modes : set[str]
         Which nodes to build: ``{"3d"}``, ``{"2d"}``, or ``{"2d", "3d"}``.
+    overlap_3d : int
+        Brick overlap (halo) in voxels for 3-D fetches.
+    overlap_2d : int
+        Tile overlap (halo) in pixels for 2-D fetches.
     voxel_scales : list[float] or None
         Physical voxel size in data-axis order (z, y, x).  Defaults to 1.0
         for each axis if not provided.
@@ -189,6 +193,8 @@ class GFXMultiscaleImageVisual:
         interpolation: str = "nearest",
         gpu_budget_bytes_3d: int = 1 * 1024**3,
         gpu_budget_bytes_2d: int = 64 * 1024**2,
+        overlap_3d: int = 3,
+        overlap_2d: int = 1,
         voxel_scales: list[float] | None = None,
         full_level_shapes: list[tuple[int, ...]] | None = None,
         full_level_transforms: list[AffineTransform] | None = None,
@@ -249,6 +255,7 @@ class GFXMultiscaleImageVisual:
                 volume_geometry=volume_geometry,
                 voxel_scales=self._voxel_scales,
                 gpu_budget_bytes=gpu_budget_bytes_3d,
+                overlap=overlap_3d,
                 colormap=colormap,
                 clim=clim,
                 threshold=threshold,
@@ -263,6 +270,7 @@ class GFXMultiscaleImageVisual:
                 image_geometry_2d=image_geometry_2d,
                 voxel_scales=self._voxel_scales,
                 gpu_budget_bytes=gpu_budget_bytes_2d,
+                overlap=overlap_2d,
                 colormap=colormap,
                 clim=clim,
                 interpolation=interpolation,

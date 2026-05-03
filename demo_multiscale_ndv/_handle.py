@@ -11,6 +11,7 @@ from ndv.views.bases._graphics._canvas_elements import CanvasElement
 from ndv.views.bases._lut_view import LUTView
 
 from demo_multiscale_ndv._cache_query import CacheQuery, CacheQuery2D, SlotId
+from demo_multiscale_ndv._indexing import IndexSpec
 
 if TYPE_CHECKING:
     import cmap
@@ -25,8 +26,9 @@ class MultiscaleVolumeHandle(CanvasElement, LUTView):
     """3-D multiscale handle: owns GPU resources, accepts brick writes.
 
     Separates *rendering* (GPU textures, LUT rebuild) from *planning*
-    (brick selection, LOD).  Planning lives in
-    ``GFXMultiscaleImageVisual.build_slice_request``; rendering is here.
+    (brick selection, LOD). Planner functions emit core data-space fetch
+    indices; the handle owns backend-specific expansion through
+    :meth:`expand_fetch_index`.
     """
 
     # ── Core brick surface ──────────────────────────────────────────────
@@ -47,10 +49,28 @@ class MultiscaleVolumeHandle(CanvasElement, LUTView):
     def cache_query(self) -> CacheQuery:
         """Return the cache-query adapter for the current frame."""
 
-    @property
     @abstractmethod
-    def overlap(self) -> int:
-        """Brick overlap in voxels added on each side of a brick."""
+    def expand_fetch_index(
+        self,
+        level: int,
+        core_index: IndexSpec,
+        level_shape: tuple[int, ...],
+        current_slice_coord: SliceCoord,
+    ) -> IndexSpec:
+        """Expand planner-produced core index to a backend fetch index.
+
+        Parameters
+        ----------
+        level :
+            Zero-indexed multiscale level for the fetch request.
+        core_index :
+            Planner-generated index without overlap/halo.
+        level_shape :
+            Full nD shape of ``level``; useful for backend-specific bounds logic.
+        current_slice_coord :
+            Current non-displayed slice position. Included for signature
+            compatibility with 2-D/3-D planners; 3-D implementations may ignore it.
+        """
 
     # ── LUTView abstract methods ────────────────────────────────────────
 
@@ -122,10 +142,19 @@ class MultiscaleImageHandle(CanvasElement, LUTView):
     def cache_query(self) -> CacheQuery2D:
         """Return the cache-query adapter for the current frame."""
 
-    @property
     @abstractmethod
-    def overlap(self) -> int:
-        """Brick overlap in voxels added on each side of a tile."""
+    def expand_fetch_index(
+        self,
+        level: int,
+        core_index: IndexSpec,
+        level_shape: tuple[int, ...],
+        current_slice_coord: SliceCoord,
+    ) -> IndexSpec:
+        """Expand planner-produced core index to a backend fetch index.
+
+        ``current_slice_coord`` is part of the 2-D cache key and can influence
+        backend expansion policy.
+        """
 
     @abstractmethod
     def evict_finer_than(self, target_level: int) -> int:

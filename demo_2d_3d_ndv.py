@@ -49,6 +49,8 @@ LOD_BIAS: float = 1.0
 BLOCK_SIZE: int = 32
 GPU_BUDGET_3D_BYTES: int = 4096 * 1024**2
 GPU_BUDGET_2D_BYTES: int = 64 * 1024**2
+OVERLAP_3D: int = 3
+OVERLAP_2D: int = 1
 CHUNKS_PER_FRAME_3D: int = 32   # max GPU uploads per draw frame (3-D bricks)
 CHUNKS_PER_FRAME_2D: int = 64   # max GPU uploads per draw frame (2-D tiles, smaller)
 
@@ -75,6 +77,12 @@ def reslice_3d(
     upload_queue: collections.deque,
     lod_bias: float = LOD_BIAS,
 ) -> None:
+    """Plan and submit 3-D brick requests.
+
+    The 3-D planner emits core brick indices and delegates overlap expansion to
+    ``volume_handle.expand_fetch_index``. Result batches are filtered by
+    ``slice_id`` before appending into ``upload_queue``.
+    """
     visual.cancel_pending()
     upload_queue.clear()
 
@@ -89,7 +97,7 @@ def reslice_3d(
         voxel_scales=visual.voxel_scales,
         full_level_shapes=visual.full_level_shapes,
         world_to_level_transforms=visual.world_to_level_transforms,
-        overlap=volume_handle.overlap,
+        expand_fetch_index=volume_handle.expand_fetch_index,
         resolved=resolved,
         lod_bias=lod_bias,
     )
@@ -145,9 +153,9 @@ def reslice_2d(
         voxel_scales=visual.voxel_scales,
         full_level_shapes=visual.full_level_shapes,
         world_to_level_transforms=visual.world_to_level_transforms,
-        overlap=image_handle.overlap,
         resolved=resolved,
         current_slice_coord=slice_coord,
+        expand_fetch_index=image_handle.expand_fetch_index,
         lod_bias=lod_bias,
         use_culling=True,
     )
@@ -224,6 +232,8 @@ def build_visual(
         full_level_transforms=list(level_transforms),
         gpu_budget_bytes_3d=GPU_BUDGET_3D_BYTES,
         gpu_budget_bytes_2d=GPU_BUDGET_2D_BYTES,
+        overlap_3d=OVERLAP_3D,
+        overlap_2d=OVERLAP_2D,
     )
 
     return visual, spatial_axes, yx_axes, z_axis
