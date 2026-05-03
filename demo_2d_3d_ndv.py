@@ -105,6 +105,15 @@ def reslice_3d(
     slice_id = requests[0].slice_request_id if requests else None
 
     def on_batch(batch):
+        """Handle one loaded batch for the current 2-D slice request.
+
+        This callback is invoked by ``AsyncSlicer`` on the Qt main thread after a
+        batch of tile reads completes. It ignores results from an outdated slice by
+        checking that the captured ``slice_id`` still matches
+        ``slicer.current_slice_id``. Valid results are appended to ``upload_queue``
+        so ``_draw_frame()`` can apply them to the 2-D visual in bounded per-frame
+        uploads.
+        """
         if slicer.current_slice_id != slice_id:
             return
         upload_queue.extend(batch)
@@ -167,6 +176,15 @@ def reslice_2d(
     slice_id = requests[0].slice_request_id if requests else None
 
     def on_batch(batch):
+        """Handle one loaded batch for the current 2-D slice request.
+
+        This callback is invoked by ``AsyncSlicer`` on the Qt main thread after a
+        batch of tile reads completes. It ignores results from an outdated slice by
+        checking that the captured ``slice_id`` still matches
+        ``slicer.current_slice_id``. Valid results are appended to ``upload_queue``
+        so ``_draw_frame()`` can apply them to the 2-D visual in bounded per-frame
+        uploads.
+        """
         if slicer.current_slice_id != slice_id:
             return
         upload_queue.extend(batch)
