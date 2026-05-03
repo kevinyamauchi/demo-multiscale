@@ -194,7 +194,7 @@ def select_visible_bricks_3d(
         Current 3-D camera state (position, frustum corners, FOV,
         viewport size).
     brick_layout : MultiscaleBrickLayout3D
-        Precomputed layout describing all LOD levels and their grids.
+        Data describing how the shader brick grid textures are setup.
     voxel_scales : np.ndarray
         Physical size of one voxel along each data axis in zyx order;
         used to convert world distances to data-space distances.
@@ -421,7 +421,7 @@ def select_visible_bricks_2d(
     camera_view : CameraView2D
         Current 2-D camera state (bounds, viewport size, world-per-pixel).
     brick_layout : MultiscaleBrickLayout2D
-        Precomputed layout describing all LOD levels and their tile grids.
+        Data describing how the shader brick grid textures are setup.
     voxel_scales : np.ndarray
         Physical size of one voxel along each data axis in zyx order.
     current_slice_coord : SliceCoord
