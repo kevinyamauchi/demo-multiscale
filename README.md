@@ -33,10 +33,14 @@ uv run download_ome_zarr.py "https://livingobjects.ebi.ac.uk/idr/zarr/v0.5/idr00
 Then view it with:
 
 ```sh
-uv run demo_2d_3d_viewer.py --zarr-path ExpA_VIP_ASLM_on.zarr
+uv run demo_2d_3d.py --zarr-path ExpA_VIP_ASLM_on.zarr
 ```
 
 The movie above was recorded with iso_thresold=300 and camera_settle=150 (ms). The camera settle time sets how long the camera state has to be constant before reslicing the scene. This is important to keep the viewer responsive when moving around the scene quickly.
 
 ## ndv demo
-To understand if it would be possible to implement this in ndv, I made a version of the demo that tries to use the ndv architecture/API as much as possible (`demo_2d_3d_ndv.py` and `demo_multiscale_ndv`). You can run it with the same commands as above.
+To understand if it would be possible to implement this in ndv, I made a version of the demo that tries to use the ndv architecture/API as much as possible (`demo_2d_3d_ndv.py` and `demo_multiscale_ndv`). You can run it with the same commands as above. For example:
+
+```sh
+uv run demo_2d_3d_ndv.py --zarr-path example.ome.zarr
+```
