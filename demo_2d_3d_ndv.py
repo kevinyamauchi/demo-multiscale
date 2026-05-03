@@ -30,6 +30,7 @@ from ndv.models._resolve import ResolvedDisplayState, resolve
 
 from demo_multiscale_ndv._camera_view import camera_view_from_gfx_2d, camera_view_from_gfx_3d
 from demo_multiscale_ndv._ome_zarr_wrapper import OMEZarrDataWrapper
+from demo_multiscale_ndv._plan_slice import plan_slice_2d, plan_slice_3d
 from demo_multiscale_ndv.render_visual import (
     GFXMultiscaleImageVisual,
     ImageGeometry2D,
@@ -75,20 +76,27 @@ def reslice_3d(
     lod_bias: float = LOD_BIAS,
 ) -> None:
     visual.cancel_pending()
-    upload_queue.clear()  # drop any items queued for the previous reslice
+    upload_queue.clear()
 
     camera_view = camera_view_from_gfx_3d(camera, canvas)
-    requests = visual.build_slice_request(
+    visual.begin_frame_3d(resolved.visible_axes)
+    volume_handle = visual.volume_handle
+
+    requests, _ = plan_slice_3d(
         camera_view=camera_view,
-        lod_bias=lod_bias,
+        cache_query=volume_handle.cache_query(),
+        geo=visual.volume_geometry,
+        voxel_scales=visual.voxel_scales,
+        full_level_shapes=visual.full_level_shapes,
+        world_to_level_transforms=visual.world_to_level_transforms,
+        overlap=volume_handle.overlap,
         resolved=resolved,
+        lod_bias=lod_bias,
     )
 
     slice_id = requests[0].slice_request_id if requests else None
 
     def on_batch(batch):
-        # Drop batches that were already in the Qt signal queue when a newer
-        # reslice superseded this one.
         if slicer.current_slice_id != slice_id:
             return
         upload_queue.extend(batch)
@@ -109,24 +117,48 @@ def reslice_2d(
     resolved: ResolvedDisplayState,
     upload_queue: collections.deque,
     lod_bias: float = LOD_BIAS,
-) -> None:
+) -> tuple[tuple[int, int], ...]:
+    """Plan and submit 2-D tile requests.
+
+    Returns the slice_coord used for this reslice so the caller can pass it to
+    ``visual.on_data_ready_2d`` when draining the upload queue.
+    """
     visual.cancel_pending_2d()
     visual.invalidate_2d_cache()
-    upload_queue.clear()  # drop any items queued for the previous reslice
+    upload_queue.clear()
 
     camera_view = camera_view_from_gfx_2d(camera, canvas)
-    requests = visual.build_slice_request_2d(
+
+    visible = set(resolved.visible_axes)
+    slice_coord: tuple[tuple[int, int], ...] = tuple(sorted(
+        (ax, v) for ax, v in resolved.current_index.items()
+        if isinstance(v, int) and ax not in visible
+    ))
+
+    visual.begin_frame_2d(resolved.visible_axes)
+    image_handle = visual.image_handle
+
+    requests, _, target_level = plan_slice_2d(
         camera_view=camera_view,
+        cache_query=image_handle.cache_query(),
+        geo=visual.image_geometry_2d,
+        voxel_scales=visual.voxel_scales,
+        full_level_shapes=visual.full_level_shapes,
+        world_to_level_transforms=visual.world_to_level_transforms,
+        overlap=image_handle.overlap,
         resolved=resolved,
+        current_slice_coord=slice_coord,
         lod_bias=lod_bias,
         use_culling=True,
     )
 
+    n_evicted = image_handle.evict_finer_than(target_level)
+    if n_evicted > 0 and not requests:
+        image_handle.rebuild_lut(slice_coord)
+
     slice_id = requests[0].slice_request_id if requests else None
 
     def on_batch(batch):
-        # Drop batches that were already in the Qt signal queue when a newer
-        # reslice superseded this one.
         if slicer.current_slice_id != slice_id:
             return
         upload_queue.extend(batch)
@@ -136,6 +168,8 @@ def reslice_2d(
         fetch_fn=lambda req: wrapper.isel(req.index, level=req.level),
         callback=on_batch,
     )
+
+    return slice_coord
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +288,7 @@ def main() -> None:
     upload_queue_2d: collections.deque = collections.deque()
 
     # ── Shared mutable state ─────────────────────────────────────────────
-    state = {"mode": "3d", "z_slice": z_depth // 2}
+    state = {"mode": "3d", "z_slice": z_depth // 2, "slice_coord_2d": ()}
 
     # ── Reslice dispatcher ───────────────────────────────────────────────
     def reslice():
@@ -267,7 +301,7 @@ def main() -> None:
         else:
             display_model_2d.current_index[z_axis] = state["z_slice"]
             resolved = resolve(display_model_2d, wrapper)
-            reslice_2d(
+            state["slice_coord_2d"] = reslice_2d(
                 visual, wrapper, camera_2d, canvas, slicer_obj,
                 resolved, upload_queue_2d,
             )
@@ -317,7 +351,7 @@ def main() -> None:
             visual.on_data_ready(drain)
         if upload_queue_2d:
             drain = [upload_queue_2d.popleft() for _ in range(min(CHUNKS_PER_FRAME_2D, len(upload_queue_2d)))]
-            visual.on_data_ready_2d(drain)
+            visual.on_data_ready_2d(drain, state["slice_coord_2d"])
         active_cam = camera_3d if state["mode"] == "3d" else camera_2d
         renderer.render(scene, active_cam)
 

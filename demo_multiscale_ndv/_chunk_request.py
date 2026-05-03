@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Mapping
 from uuid import UUID
 
-SlotId = int  # opaque cache slot identifier; becomes meaningful in Phase 3
+from demo_multiscale_ndv._cache_query import SlotId  # noqa: F401  single definition
 
 
 @dataclass(frozen=True)
