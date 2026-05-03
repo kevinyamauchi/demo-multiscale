@@ -218,12 +218,274 @@ def build_visual(
     return visual, spatial_axes, yx_axes, z_axis
 
 
+class Viewer(QtWidgets.QWidget):
+    """Interactive 2-D/3-D multiscale viewer widget."""
+
+    def __init__(self, data_store: OMEZarrImageDataStore, parent=None):
+        super().__init__(parent=parent)
+        self.data_store = data_store
+
+        self._init_models()
+        self._init_rendering()
+        self._init_ui()
+        self._connect_signals()
+
+    def _init_models(self) -> None:
+        vox_shape = np.array(self.data_store.level_shapes[0], dtype=np.float64)
+        vs_full = np.array(self.data_store.voxel_sizes, dtype=np.float64)
+        self.voxel_scales_3d = list(vs_full[-3:])  # ZYX
+
+        world_extents = vox_shape * vs_full
+        max_extent = float(world_extents.max())
+        self.near = max(1.0, max_extent * 0.0001)
+        self.far = max_extent * 10.0
+
+        self.visual, self.spatial_axes, self.yx_axes, self.z_axis = build_visual(
+            self.data_store, self.voxel_scales_3d
+        )
+        self.axis_labels = tuple(self.data_store.axis_names)
+        self.z_depth = self.data_store.level_shapes[0][self.z_axis]
+
+        self.mode = "3d"
+        self.z_slice = self.z_depth // 2
+        self.settle_ms = 150
+        self._last_view_state: tuple[object, ...] | None = None
+
+    def _init_rendering(self) -> None:
+        self.canvas = QRenderWidget(update_mode="continuous")
+        self.renderer = gfx.WgpuRenderer(self.canvas)
+        self.scene = gfx.Scene()
+        self.scene.add(gfx.AmbientLight())
+        self.scene.add(self.visual.node_3d)
+
+        self.camera_3d = gfx.PerspectiveCamera(70, depth_range=(self.near, self.far))
+        self.camera_3d.show_object(self.scene, up=(0, 0, 1))
+        self.controller_3d = gfx.OrbitController(self.camera_3d, register_events=self.renderer)
+
+        h0 = self.data_store.level_shapes[0][self.yx_axes[0]]
+        w0 = self.data_store.level_shapes[0][self.yx_axes[1]]
+        self.world_w = float(w0) * float(self.voxel_scales_3d[2])
+        self.world_h = float(h0) * float(self.voxel_scales_3d[1])
+
+        self.camera_2d = gfx.OrthographicCamera(width=self.world_w, height=self.world_h)
+        self.camera_2d.local.position = (self.world_w / 2.0, self.world_h / 2.0, 0.0)
+        self.controller_2d = gfx.PanZoomController(self.camera_2d, register_events=self.renderer)
+        self.controller_2d.enabled = False
+
+        self.slicer_obj = AsyncSlicer()
+        self.upload_queue_3d: collections.deque = collections.deque()
+        self.upload_queue_2d: collections.deque = collections.deque()
+
+        self.settle_timer = QTimer()
+        self.settle_timer.setSingleShot(True)
+        self.settle_timer.timeout.connect(self._reslice)
+
+        self.canvas.request_draw(self._draw_frame)
+
+    def _init_ui(self) -> None:
+        panel = QtWidgets.QWidget()
+        panel.setFixedWidth(240)
+        p_layout = QtWidgets.QVBoxLayout(panel)
+        p_layout.setAlignment(Qt.AlignTop)
+
+        shape_str = " x ".join(str(s) for s in self.data_store.level_shapes[0])
+        info_label = QtWidgets.QLabel(
+            f"Shape: {shape_str}\n"
+            f"Levels: {self.data_store.n_levels}\n"
+            f"Axes: {' '.join(self.data_store.axis_names)}\n"
+            f"Scales: {self.data_store.voxel_sizes}"
+        )
+        info_label.setWordWrap(True)
+        p_layout.addWidget(info_label)
+
+        dtype_max = _dtype_max(np.dtype(self.data_store.dtype))
+
+        clim_group = QtWidgets.QGroupBox("Contrast limits")
+        clim_layout = QtWidgets.QVBoxLayout(clim_group)
+        self.clim_slider = QLabeledDoubleRangeSlider(Qt.Horizontal)
+        self.clim_slider.setRange(0.0, dtype_max)
+        self.clim_slider.setValue((INITIAL_CLIM_LOW, INITIAL_CLIM_HIGH))
+        clim_layout.addWidget(self.clim_slider)
+        p_layout.addWidget(clim_group)
+
+        threshold_group = QtWidgets.QGroupBox("ISO threshold")
+        threshold_layout = QtWidgets.QVBoxLayout(threshold_group)
+        self.threshold_slider = QLabeledDoubleSlider(Qt.Horizontal)
+        self.threshold_slider.setRange(0.0, dtype_max)
+        self.threshold_slider.setValue(INITIAL_ISO_THRESHOLD)
+        threshold_layout.addWidget(self.threshold_slider)
+        p_layout.addWidget(threshold_group)
+
+        self.mode_label = QtWidgets.QLabel("Mode: 3-D")
+        p_layout.addWidget(self.mode_label)
+
+        self.toggle_btn = QtWidgets.QPushButton("Toggle 2-D / 3-D")
+        p_layout.addWidget(self.toggle_btn)
+
+        self.render_group = QtWidgets.QGroupBox("Render mode")
+        rg_layout = QtWidgets.QVBoxLayout(self.render_group)
+        self.mode_combo = QtWidgets.QComboBox()
+        self.mode_combo.addItems(["iso", "mip"])
+        rg_layout.addWidget(self.mode_combo)
+        p_layout.addWidget(self.render_group)
+
+        settle_group = QtWidgets.QGroupBox("Camera settle (ms)")
+        settle_layout = QtWidgets.QVBoxLayout(settle_group)
+        self.settle_spin = QtWidgets.QSpinBox()
+        self.settle_spin.setRange(0, 2000)
+        self.settle_spin.setValue(self.settle_ms)
+        settle_layout.addWidget(self.settle_spin)
+        p_layout.addWidget(settle_group)
+
+        self.z_group = QtWidgets.QGroupBox("Z slice")
+        z_layout = QtWidgets.QVBoxLayout(self.z_group)
+        self.z_spin = QtWidgets.QSpinBox()
+        self.z_spin.setRange(0, self.z_depth - 1)
+        self.z_spin.setValue(self.z_slice)
+        z_layout.addWidget(self.z_spin)
+        self.z_group.setVisible(False)
+        p_layout.addWidget(self.z_group)
+
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.canvas, stretch=1)
+        layout.addWidget(panel)
+
+    def _connect_signals(self) -> None:
+        self.clim_slider.valueChanged.connect(self._on_clim_change)
+        self.threshold_slider.valueChanged.connect(self._on_threshold_change)
+        self.mode_combo.currentTextChanged.connect(self._on_render_mode_change)
+        self.settle_spin.valueChanged.connect(self._on_settle_change)
+        self.z_spin.valueChanged.connect(self._on_z_slice_change)
+        self.toggle_btn.clicked.connect(self._on_toggle)
+
+    def _reslice(self) -> None:
+        if self.mode == "3d":
+            reslice_3d(
+                self.visual,
+                self.data_store,
+                self.camera_3d,
+                self.canvas,
+                self.slicer_obj,
+                self.axis_labels,
+                self.spatial_axes,
+                self.upload_queue_3d,
+            )
+            return
+
+        reslice_2d(
+            self.visual,
+            self.data_store,
+            self.camera_2d,
+            self.canvas,
+            self.slicer_obj,
+            self.axis_labels,
+            self.yx_axes,
+            self.z_axis,
+            self.z_slice,
+            self.upload_queue_2d,
+        )
+
+    def _active_cam_state(self) -> tuple[object, ...]:
+        logical_size = tuple(self.canvas.get_logical_size())
+        if self.mode == "3d":
+            return (
+                "3d",
+                tuple(self.camera_3d.world.position),
+                tuple(self.camera_3d.world.rotation),
+                float(self.camera_3d.fov),
+                logical_size,
+            )
+        return (
+            "2d",
+            tuple(self.camera_2d.world.position),
+            tuple(self.camera_2d.world.rotation),
+            float(self.camera_2d.width),
+            float(self.camera_2d.height),
+            logical_size,
+        )
+
+    def _camera_changed(self) -> bool:
+        state = self._active_cam_state()
+        if state != self._last_view_state:
+            self._last_view_state = state
+            return True
+        return False
+
+    def _draw_frame(self) -> None:
+        if self._camera_changed():
+            self.settle_timer.start(self.settle_ms)
+
+        if self.upload_queue_3d:
+            n_3d = min(CHUNKS_PER_FRAME_3D, len(self.upload_queue_3d))
+            drain = [self.upload_queue_3d.popleft() for _ in range(n_3d)]
+            self.visual.on_data_ready(drain)
+
+        if self.upload_queue_2d:
+            n_2d = min(CHUNKS_PER_FRAME_2D, len(self.upload_queue_2d))
+            drain = [self.upload_queue_2d.popleft() for _ in range(n_2d)]
+            self.visual.on_data_ready_2d(drain)
+
+        active_cam = self.camera_3d if self.mode == "3d" else self.camera_2d
+        self.renderer.render(self.scene, active_cam)
+
+    def _on_clim_change(self, values: tuple[float, float]) -> None:
+        if self.visual.material_3d is not None:
+            self.visual.material_3d.clim = values
+        if self.visual.material_2d is not None:
+            self.visual.material_2d.clim = values
+
+    def _on_threshold_change(self, value: float) -> None:
+        if self.visual.material_3d is not None:
+            self.visual.material_3d.threshold = value
+
+    def _on_render_mode_change(self, value: str) -> None:
+        if self.visual.material_3d is not None:
+            self.visual.material_3d.render_mode = value
+        self._reslice()
+
+    def _on_settle_change(self, value: int) -> None:
+        self.settle_ms = value
+
+    def _on_z_slice_change(self, value: int) -> None:
+        self.z_slice = value
+        self._reslice()
+
+    def _on_toggle(self) -> None:
+        self.visual.cancel_pending()
+        self.visual.cancel_pending_2d()
+        self.settle_timer.stop()
+        self._last_view_state = None
+
+        if self.mode == "3d":
+            self.mode = "2d"
+            self.scene.remove(self.visual.node_3d)
+            self.scene.add(self.visual.node_2d)
+            self.controller_3d.enabled = False
+            self.controller_2d.enabled = True
+            self.render_group.setVisible(False)
+            self.z_group.setVisible(True)
+            self.mode_label.setText("Mode: 2-D")
+            self.camera_2d.local.position = (self.world_w / 2.0, self.world_h / 2.0, 0.0)
+            self.camera_2d.width = self.world_w
+        else:
+            self.mode = "3d"
+            self.scene.remove(self.visual.node_2d)
+            self.scene.add(self.visual.node_3d)
+            self.controller_3d.enabled = True
+            self.controller_2d.enabled = False
+            self.render_group.setVisible(True)
+            self.z_group.setVisible(False)
+            self.mode_label.setText("Mode: 3-D")
+
+        self._reslice()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="2-D / 3-D multiscale viewer")
     parser.add_argument("--zarr-path", required=True)
     args = parser.parse_args()
 
-    # ── Load data store ──────────────────────────────────────────────────
     print(f"Opening: {args.zarr_path}")
     data_store = OMEZarrImageDataStore.from_path(args.zarr_path)
     print(f"  levels : {data_store.n_levels}")
@@ -231,260 +493,11 @@ def main() -> None:
     print(f"  axes   : {data_store.axis_names}")
     print(f"  scales : {data_store.voxel_sizes}")
 
-    vox_shape = np.array(data_store.level_shapes[0], dtype=np.float64)
-    vs_full = np.array(data_store.voxel_sizes, dtype=np.float64)
-    voxel_scales_3d = list(vs_full[-3:])  # ZYX
-
-    world_extents = vox_shape * vs_full
-    max_extent = float(world_extents.max())
-    near = max(1.0, max_extent * 0.0001)
-    far = max_extent * 10.0
-
-    # ── Build visual ─────────────────────────────────────────────────────
-    visual, spatial_axes, yx_axes, z_axis = build_visual(data_store, voxel_scales_3d)
-    axis_labels = tuple(data_store.axis_names)
-
-    z_depth = data_store.level_shapes[0][z_axis]
-
-    # ── pygfx setup ──────────────────────────────────────────────────────
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
-
-    canvas = QRenderWidget(update_mode="continuous")
-    renderer = gfx.WgpuRenderer(canvas)
-    scene = gfx.Scene()
-    scene.add(gfx.AmbientLight())
-    scene.add(visual.node_3d)
-
-    # 3-D camera
-    camera_3d = gfx.PerspectiveCamera(70, depth_range=(near, far))
-    camera_3d.show_object(scene, up=(0, 0, 1))
-    controller_3d = gfx.OrbitController(camera_3d, register_events=renderer)
-
-    # 2-D camera (initially disabled)
-    h0, w0 = data_store.level_shapes[0][yx_axes[0]], data_store.level_shapes[0][yx_axes[1]]
-    world_w = float(w0) * float(voxel_scales_3d[2])
-    world_h = float(h0) * float(voxel_scales_3d[1])
-    camera_2d = gfx.OrthographicCamera(width=world_w, height=world_h)
-    camera_2d.local.position = (world_w / 2.0, world_h / 2.0, 0.0)
-    controller_2d = gfx.PanZoomController(camera_2d, register_events=renderer)
-    controller_2d.enabled = False
-
-    slicer_obj = AsyncSlicer()
-    upload_queue_3d: collections.deque = collections.deque()
-    upload_queue_2d: collections.deque = collections.deque()
-
-    # ── Shared mutable state ─────────────────────────────────────────────
-    state = {"mode": "3d", "z_slice": z_depth // 2}
-
-    # ── Reslice dispatcher ───────────────────────────────────────────────
-    def reslice():
-        if state["mode"] == "3d":
-            reslice_3d(
-                visual, data_store, camera_3d, canvas, slicer_obj,
-                axis_labels, spatial_axes, upload_queue_3d,
-            )
-        else:
-            reslice_2d(
-                visual, data_store, camera_2d, canvas, slicer_obj,
-                axis_labels, yx_axes, z_axis, state["z_slice"], upload_queue_2d,
-            )
-
-    # ── Settle timer (debounce reslice until camera is still) ────────────
-    settle_ms = [150]
-
-    settle_timer = QTimer()
-    settle_timer.setSingleShot(True)
-    settle_timer.timeout.connect(reslice)
-
-    # ── View-change detection (compare state each frame) ─────────────────
-    _last_view_state: list[tuple[object, ...] | None] = [None]
-
-    def _active_cam_state() -> tuple:
-        logical_size = tuple(canvas.get_logical_size())
-        if state["mode"] == "3d":
-            return (
-                "3d",
-                tuple(camera_3d.world.position),
-                tuple(camera_3d.world.rotation),
-                float(camera_3d.fov),
-                logical_size,
-            )
-        return (
-            "2d",
-            tuple(camera_2d.world.position),
-            tuple(camera_2d.world.rotation),
-            float(camera_2d.width),
-            float(camera_2d.height),
-            logical_size,
-        )
-
-    def _camera_changed() -> bool:
-        s = _active_cam_state()
-        if s != _last_view_state[0]:
-            _last_view_state[0] = s
-            return True
-        return False
-
-    # ── Draw function (called each frame by QRenderWidget) ───────────────
-    def draw_frame():
-        if _camera_changed():
-            settle_timer.start(settle_ms[0])
-        if upload_queue_3d:
-            drain = [upload_queue_3d.popleft() for _ in range(min(CHUNKS_PER_FRAME_3D, len(upload_queue_3d)))]
-            visual.on_data_ready(drain)
-        if upload_queue_2d:
-            drain = [upload_queue_2d.popleft() for _ in range(min(CHUNKS_PER_FRAME_2D, len(upload_queue_2d)))]
-            visual.on_data_ready_2d(drain)
-        active_cam = camera_3d if state["mode"] == "3d" else camera_2d
-        renderer.render(scene, active_cam)
-
-    canvas.request_draw(draw_frame)
-
-    # ── Qt side panel ────────────────────────────────────────────────────
-    panel = QtWidgets.QWidget()
-    panel.setFixedWidth(240)
-    p_layout = QtWidgets.QVBoxLayout(panel)
-    p_layout.setAlignment(Qt.AlignTop)
-
-    # Info
-    shape_str = " × ".join(str(s) for s in data_store.level_shapes[0])
-    info_label = QtWidgets.QLabel(
-        f"Shape: {shape_str}\n"
-        f"Levels: {data_store.n_levels}\n"
-        f"Axes: {' '.join(data_store.axis_names)}\n"
-        f"Scales: {data_store.voxel_sizes}"
-    )
-    info_label.setWordWrap(True)
-    p_layout.addWidget(info_label)
-
-    dtype_max = _dtype_max(np.dtype(data_store.dtype))
-
-    # Contrast limits
-    clim_group = QtWidgets.QGroupBox("Contrast limits")
-    clim_layout = QtWidgets.QVBoxLayout(clim_group)
-    clim_slider = QLabeledDoubleRangeSlider(Qt.Horizontal)
-    clim_slider.setRange(0.0, dtype_max)
-    clim_slider.setValue((INITIAL_CLIM_LOW, INITIAL_CLIM_HIGH))
-
-    def on_clim_change(values: tuple[float, float]) -> None:
-        if visual.material_3d is not None:
-            visual.material_3d.clim = values
-        if visual.material_2d is not None:
-            visual.material_2d.clim = values
-
-    clim_slider.valueChanged.connect(on_clim_change)
-    clim_layout.addWidget(clim_slider)
-    p_layout.addWidget(clim_group)
-
-    # ISO threshold
-    threshold_group = QtWidgets.QGroupBox("ISO threshold")
-    threshold_layout = QtWidgets.QVBoxLayout(threshold_group)
-    threshold_slider = QLabeledDoubleSlider(Qt.Horizontal)
-    threshold_slider.setRange(0.0, dtype_max)
-    threshold_slider.setValue(INITIAL_ISO_THRESHOLD)
-
-    def on_threshold_change(value: float) -> None:
-        if visual.material_3d is not None:
-            visual.material_3d.threshold = value
-
-    threshold_slider.valueChanged.connect(on_threshold_change)
-    threshold_layout.addWidget(threshold_slider)
-    p_layout.addWidget(threshold_group)
-
-    # Mode label
-    mode_label = QtWidgets.QLabel("Mode: 3-D")
-    p_layout.addWidget(mode_label)
-
-    # Toggle button
-    toggle_btn = QtWidgets.QPushButton("Toggle 2-D / 3-D")
-    p_layout.addWidget(toggle_btn)
-
-    # Render mode (3D only)
-    render_group = QtWidgets.QGroupBox("Render mode")
-    rg_layout = QtWidgets.QVBoxLayout(render_group)
-    mode_combo = QtWidgets.QComboBox()
-    mode_combo.addItems(["iso", "mip"])
-    rg_layout.addWidget(mode_combo)
-    p_layout.addWidget(render_group)
-
-    def on_render_mode_change(value):
-        if visual.material_3d is not None:
-            visual.material_3d.render_mode = value
-        reslice()
-
-    mode_combo.currentTextChanged.connect(on_render_mode_change)
-
-    # Settle time
-    settle_group = QtWidgets.QGroupBox("Camera settle (ms)")
-    settle_layout = QtWidgets.QVBoxLayout(settle_group)
-    settle_spin = QtWidgets.QSpinBox()
-    settle_spin.setRange(0, 2000)
-    settle_spin.setValue(settle_ms[0])
-
-    def on_settle_change(v: int) -> None:
-        settle_ms[0] = v
-
-    settle_spin.valueChanged.connect(on_settle_change)
-    settle_layout.addWidget(settle_spin)
-    p_layout.addWidget(settle_group)
-
-    # Z-slice spinner (2D only, initially hidden)
-    z_group = QtWidgets.QGroupBox("Z slice")
-    z_layout = QtWidgets.QVBoxLayout(z_group)
-    z_spin = QtWidgets.QSpinBox()
-    z_spin.setRange(0, z_depth - 1)
-    z_spin.setValue(state["z_slice"])
-    z_layout.addWidget(z_spin)
-    z_group.setVisible(False)
-    p_layout.addWidget(z_group)
-
-    z_spin.valueChanged.connect(
-        lambda v: (state.update({"z_slice": v}), reslice())
-    )
-
-    # Toggle handler
-    def on_toggle():
-        visual.cancel_pending()
-        visual.cancel_pending_2d()
-        settle_timer.stop()
-        _last_view_state[0] = None
-
-        if state["mode"] == "3d":
-            state["mode"] = "2d"
-            scene.remove(visual.node_3d)
-            scene.add(visual.node_2d)
-            controller_3d.enabled = False
-            controller_2d.enabled = True
-            render_group.setVisible(False)
-            z_group.setVisible(True)
-            mode_label.setText("Mode: 2-D")
-            # Fit 2-D camera to physical image footprint
-            camera_2d.local.position = (world_w / 2.0, world_h / 2.0, 0.0)
-            camera_2d.width = world_w
-        else:
-            state["mode"] = "3d"
-            scene.remove(visual.node_2d)
-            scene.add(visual.node_3d)
-            controller_3d.enabled = True
-            controller_2d.enabled = False
-            render_group.setVisible(True)
-            z_group.setVisible(False)
-            mode_label.setText("Mode: 3-D")
-
-        reslice()
-
-    toggle_btn.clicked.connect(on_toggle)
-
-    # ── Main window ──────────────────────────────────────────────────────
-    win = QtWidgets.QWidget()
-    win.setWindowTitle("demo_2d_3d")
-    w_layout = QtWidgets.QHBoxLayout(win)
-    w_layout.setContentsMargins(0, 0, 0, 0)
-    w_layout.addWidget(canvas, stretch=1)
-    w_layout.addWidget(panel)
-    win.resize(1140, 700)
-    win.show()
-
+    viewer = Viewer(data_store)
+    viewer.setWindowTitle("demo_2d_3d")
+    viewer.resize(1140, 700)
+    viewer.show()
     app.exec()
 
 
