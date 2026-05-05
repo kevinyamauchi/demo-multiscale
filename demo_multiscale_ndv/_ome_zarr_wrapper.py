@@ -149,3 +149,7 @@ class OMEZarrDataWrapper(MultiscaleDataWrapper):
     @property
     def axis_names(self) -> list[str]:
         return self._data.axis_names
+
+    @property
+    def axis_types(self) -> list[str]:
+        return self._data.axis_types

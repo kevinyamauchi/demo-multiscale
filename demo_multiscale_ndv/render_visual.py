@@ -62,8 +62,8 @@ class MultiscaleBrickLayout3D:
             float(np.prod(sv) ** (1.0 / len(sv))) for sv in sv_data
         ]
 
-        self._scale_vecs_shader = [sv[[2, 1, 0]] for sv in sv_data]
-        self._translation_vecs_shader = [tv[[2, 1, 0]] for tv in tv_data]
+        self._scale_vecs_shader = [sv[::-1] for sv in sv_data]
+        self._translation_vecs_shader = [tv[::-1] for tv in tv_data]
 
         self._scale_arr_shader = np.stack(self._scale_vecs_shader, axis=0)
         self._translation_arr_shader = np.stack(self._translation_vecs_shader, axis=0)
@@ -113,8 +113,8 @@ class MultiscaleBrickLayout2D:
         self._scale_vecs_data = sv_data
         self._translation_vecs_data = tv_data
 
-        self._scale_vecs_shader = [sv[[1, 0]] for sv in sv_data]
-        self._translation_vecs_shader = [tv[[1, 0]] for tv in tv_data]
+        self._scale_vecs_shader = [sv[::-1] for sv in sv_data]
+        self._translation_vecs_shader = [tv[::-1] for tv in tv_data]
 
         self._scale_arr_shader = np.stack(self._scale_vecs_shader, axis=0)
         self._translation_arr_shader = np.stack(self._translation_vecs_shader, axis=0)

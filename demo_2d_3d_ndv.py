@@ -111,9 +111,8 @@ def reslice_3d(
     # a consistent timestamp.
     volume_handle.advance_frame()
 
-    # Derive ZYX voxel scales from the wrapper (full nD scales, take last 3).
-    # this will have to be done properly using the resolved display state.
-    voxel_scales = np.asarray(wrapper.voxel_sizes, dtype=np.float64)[-3:]
+    # Scales for the displayed axes in display order (used by LOD and culling).
+    voxel_scales = np.asarray(wrapper.voxel_sizes, dtype=np.float64)[list(resolved.visible_axes)]
 
     # Pure selection: choose and prioritize visible bricks based on camera
     # position, frustum, and LOD thresholds. No cache interaction here.
@@ -217,9 +216,8 @@ def reslice_2d(
     # a consistent timestamp.
     image_handle.advance_frame()
 
-    # Derive ZYX voxel scales from the wrapper (full nD scales, take last 3).
-    # this will have to be done properly using the resolved display state.
-    voxel_scales = np.asarray(wrapper.voxel_sizes, dtype=np.float64)[-3:]
+    # Scales for the displayed axes in display order (used by LOD and culling).
+    voxel_scales = np.asarray(wrapper.voxel_sizes, dtype=np.float64)[list(resolved.visible_axes)]
 
     # View selection: choose and prioritize visible tiles based on camera
     # bounds, LOD thresholds, and viewport culling. No cache interaction here.
@@ -280,21 +278,38 @@ def reslice_2d(
 # ---------------------------------------------------------------------------
 
 
+def _find_spatial_axes(
+    wrapper: OMEZarrDataWrapper,
+) -> tuple[tuple[int, ...], tuple[int, int]]:
+    """Return (spatial_axes_3d, yx_axes) derived from OME-Zarr axis-type metadata.
+
+    Selects the last three axes whose type is "space" for the 3-D view and the
+    last two of those for the 2-D view.  Falls back to the trailing three data
+    axes if fewer than three spatial axes are recorded in the metadata.
+    """
+    axis_types = wrapper.axis_types
+    n = len(axis_types)
+    spatial = [i for i, t in enumerate(axis_types) if t == "space"]
+    if len(spatial) >= 3:
+        spatial_axes: tuple[int, ...] = tuple(spatial[-3:])
+    else:
+        spatial_axes = tuple(range(n - 3, n))
+    yx_axes: tuple[int, int] = (spatial_axes[-2], spatial_axes[-1])
+    return spatial_axes, yx_axes
+
+
 def build_visual(
     wrapper: OMEZarrDataWrapper,
-    voxel_scales: list[float],
-) -> tuple[GFXMultiscaleImageVisual, tuple[int, ...], tuple[int, int], int]:
-    """Build visual and return (visual, spatial_axes_3d, yx_axes, z_axis)."""
+    spatial_axes: tuple[int, ...],
+    yx_axes: tuple[int, int],
+) -> GFXMultiscaleImageVisual:
+    """Build and return the GFXMultiscaleImageVisual for the given displayed axes."""
     shapes = wrapper.level_shapes
-    n_axes = len(shapes[0])
-
-    # Last 3 axes: spatial ZYX
-    spatial_axes = tuple(range(n_axes - 3, n_axes))
-    z_axis, y_axis, x_axis = spatial_axes
-    yx_axes = (y_axis, x_axis)
+    vs = np.asarray(wrapper.voxel_sizes, dtype=np.float64)
+    voxel_scales_3d = list(vs[list(spatial_axes)])
 
     shapes_3d = [tuple(s[ax] for ax in spatial_axes) for s in shapes]
-    shapes_2d = [(s[y_axis], s[x_axis]) for s in shapes]
+    shapes_2d = [(s[yx_axes[0]], s[yx_axes[1]]) for s in shapes]
 
     level_transforms = wrapper.level_transforms
     transforms_3d = [t.set_slice(spatial_axes) for t in level_transforms]
@@ -313,7 +328,7 @@ def build_visual(
         level_transforms=transforms_2d,
     )
 
-    visual = GFXMultiscaleImageVisual(
+    return GFXMultiscaleImageVisual(
         visual_model_id=uuid4(),
         volume_geometry=volume_geometry,
         image_geometry_2d=image_geometry_2d,
@@ -322,15 +337,13 @@ def build_visual(
         colormap=gfx.cm.viridis,
         clim=(INITIAL_CLIM_LOW, INITIAL_CLIM_HIGH),
         threshold=INITIAL_ISO_THRESHOLD,
-        voxel_scales=voxel_scales,
+        voxel_scales=voxel_scales_3d,
         full_level_shapes=list(shapes),
         gpu_budget_bytes_3d=GPU_BUDGET_3D_BYTES,
         gpu_budget_bytes_2d=GPU_BUDGET_2D_BYTES,
         overlap_3d=OVERLAP_3D,
         overlap_2d=OVERLAP_2D,
     )
-
-    return visual, spatial_axes, yx_axes, z_axis
 
 
 class Viewer(QtWidgets.QWidget):
@@ -348,23 +361,21 @@ class Viewer(QtWidgets.QWidget):
     def _init_models(self) -> None:
         vox_shape = np.array(self.wrapper.level_shapes[0], dtype=np.float64)
         vs_full = np.array(self.wrapper.voxel_sizes, dtype=np.float64)
-        self.voxel_scales_3d = list(vs_full[-3:])  # ZYX
 
         world_extents = vox_shape * vs_full
         max_extent = float(world_extents.max())
         self.near = max(1.0, max_extent * 0.0001)
         self.far = max_extent * 10.0
 
-        self.visual, self.spatial_axes, self.yx_axes, self.z_axis = build_visual(
-            self.wrapper, self.voxel_scales_3d
-        )
-        self.z_depth = self.wrapper.level_shapes[0][self.z_axis]
+        self.spatial_axes, self.yx_axes = _find_spatial_axes(self.wrapper)
+        self._spatial_axes_set = set(self.spatial_axes)
+
+        self.visual = build_visual(self.wrapper, self.spatial_axes, self.yx_axes)
 
         self.display_model_3d = ArrayDisplayModel(visible_axes=self.spatial_axes)
         self.display_model_2d = ArrayDisplayModel(visible_axes=self.yx_axes)
 
         self.mode = "3d"
-        self.z_slice = self.z_depth // 2
         self.slice_coord_2d: tuple[tuple[int, int], ...] = ()
         self.settle_ms = 150
         self._last_view_state: tuple[object, ...] | None = None
@@ -382,8 +393,9 @@ class Viewer(QtWidgets.QWidget):
 
         h0 = self.wrapper.level_shapes[0][self.yx_axes[0]]
         w0 = self.wrapper.level_shapes[0][self.yx_axes[1]]
-        self.world_w = float(w0) * float(self.voxel_scales_3d[2])
-        self.world_h = float(h0) * float(self.voxel_scales_3d[1])
+        vs = self.wrapper.voxel_sizes
+        self.world_w = float(w0) * float(vs[self.yx_axes[1]])
+        self.world_h = float(h0) * float(vs[self.yx_axes[0]])
 
         self.camera_2d = gfx.OrthographicCamera(width=self.world_w, height=self.world_h)
         self.camera_2d.local.position = (self.world_w / 2.0, self.world_h / 2.0, 0.0)
@@ -455,14 +467,23 @@ class Viewer(QtWidgets.QWidget):
         settle_layout.addWidget(self.settle_spin)
         p_layout.addWidget(settle_group)
 
-        self.z_group = QtWidgets.QGroupBox("Z slice")
-        z_layout = QtWidgets.QVBoxLayout(self.z_group)
-        self.z_spin = QtWidgets.QSpinBox()
-        self.z_spin.setRange(0, self.z_depth - 1)
-        self.z_spin.setValue(self.z_slice)
-        z_layout.addWidget(self.z_spin)
-        self.z_group.setVisible(False)
-        p_layout.addWidget(self.z_group)
+        self._slice_spins: dict[int, QtWidgets.QSpinBox] = {}
+        self._slice_group = QtWidgets.QGroupBox("Slice axes")
+        slice_layout = QtWidgets.QFormLayout(self._slice_group)
+        n_axes = len(self.wrapper.level_shapes[0])
+        axis_names = self.wrapper.axis_names
+        for ax in range(n_axes):
+            if ax in set(self.yx_axes):
+                continue
+            depth = self.wrapper.level_shapes[0][ax]
+            spin = QtWidgets.QSpinBox()
+            spin.setRange(0, depth - 1)
+            spin.setValue(depth // 2)
+            label = axis_names[ax] if ax < len(axis_names) else str(ax)
+            slice_layout.addRow(label, spin)
+            self._slice_spins[ax] = spin
+        p_layout.addWidget(self._slice_group)
+        self._update_slice_spin_visibility()
 
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -474,11 +495,26 @@ class Viewer(QtWidgets.QWidget):
         self.threshold_slider.valueChanged.connect(self._on_threshold_change)
         self.mode_combo.currentTextChanged.connect(self._on_render_mode_change)
         self.settle_spin.valueChanged.connect(self._on_settle_change)
-        self.z_spin.valueChanged.connect(self._on_z_slice_change)
+        for spin in self._slice_spins.values():
+            spin.valueChanged.connect(self._reslice)
         self.toggle_btn.clicked.connect(self._on_toggle)
+
+    def _update_slice_spin_visibility(self) -> None:
+        # Use intended visibility (mode + axis role), not Qt's propagated
+        # runtime visibility state, to avoid parent/child circular hiding.
+        visible_axes = {
+            ax for ax in self._slice_spins
+            if self.mode == "2d" or ax not in self._spatial_axes_set
+        }
+        self._slice_group.setVisible(bool(visible_axes))
+        for ax, spin in self._slice_spins.items():
+            spin.setVisible(ax in visible_axes)
 
     def _reslice(self) -> None:
         if self.mode == "3d":
+            for ax, spin in self._slice_spins.items():
+                if ax not in self._spatial_axes_set:
+                    self.display_model_3d.current_index[ax] = spin.value()
             resolved = resolve(self.display_model_3d, self.wrapper)
             self.visual.update_display_axes(resolved.visible_axes)
             camera_view = camera_view_from_gfx_3d(self.camera_3d, self.canvas)
@@ -492,7 +528,8 @@ class Viewer(QtWidgets.QWidget):
             )
             return
 
-        self.display_model_2d.current_index[self.z_axis] = self.z_slice
+        for ax, spin in self._slice_spins.items():
+            self.display_model_2d.current_index[ax] = spin.value()
         resolved = resolve(self.display_model_2d, self.wrapper)
         self.visual.update_display_axes(resolved.visible_axes)
         camera_view = camera_view_from_gfx_2d(self.camera_2d, self.canvas)
@@ -566,10 +603,6 @@ class Viewer(QtWidgets.QWidget):
     def _on_settle_change(self, value: int) -> None:
         self.settle_ms = value
 
-    def _on_z_slice_change(self, value: int) -> None:
-        self.z_slice = value
-        self._reslice()
-
     def _on_toggle(self) -> None:
         if self.visual.volume_handle is not None:
             self.visual.volume_handle.invalidate_pending()
@@ -585,7 +618,6 @@ class Viewer(QtWidgets.QWidget):
             self.controller_3d.enabled = False
             self.controller_2d.enabled = True
             self.render_group.setVisible(False)
-            self.z_group.setVisible(True)
             self.mode_label.setText("Mode: 2-D")
             self.camera_2d.local.position = (self.world_w / 2.0, self.world_h / 2.0, 0.0)
             self.camera_2d.width = self.world_w
@@ -596,8 +628,8 @@ class Viewer(QtWidgets.QWidget):
             self.controller_3d.enabled = True
             self.controller_2d.enabled = False
             self.render_group.setVisible(True)
-            self.z_group.setVisible(False)
             self.mode_label.setText("Mode: 3-D")
+        self._update_slice_spin_visibility()
 
         self._reslice()
 

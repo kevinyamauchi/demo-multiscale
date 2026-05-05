@@ -454,8 +454,8 @@ def select_visible_bricks_2d(
     # Convert the world-space viewport width to an effective voxel width using
     # the geometric mean of the x and y scales so that non-square pixels are
     # handled without introducing axis bias.
-    scale_x = float(voxel_scales[2])
-    scale_y = float(voxel_scales[1])
+    scale_x = float(voxel_scales[1])
+    scale_y = float(voxel_scales[0])
     voxel_width = world_width / (scale_x * scale_y) ** 0.5
     cx = (xmin + xmax) / 2.0
     cy = (ymin + ymax) / 2.0
