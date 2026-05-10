@@ -18,11 +18,19 @@ class CacheQuery(Protocol):
         """Number of allocatable slots (excludes reserved slot 0)."""
         ...
 
-    def is_resident(self, key: BrickKey) -> bool:
+    def is_resident(
+        self,
+        key: BrickKey,
+        slice_coord: tuple[tuple[int, int], ...] = (),
+    ) -> bool:
         """Return True and refresh LRU timestamp if the brick is in the cache."""
         ...
 
-    def allocate_slot(self, key: BrickKey) -> SlotId:
+    def allocate_slot(
+        self,
+        key: BrickKey,
+        slice_coord: tuple[tuple[int, int], ...] = (),
+    ) -> SlotId:
         """Reserve a cache slot for *key* (evicting LRU if necessary).
 
         The slot is in-flight until the handle's ``commit()`` is called.

@@ -50,12 +50,17 @@ class BlockKey3D:
         1-indexed LOAD level (1 = finest).
     gz, gy, gx : int
         Grid position at this level's resolution.
+    slice_coord : tuple of (axis, index) pairs
+        Sorted non-displayed axis positions at the time this brick was
+        requested. Two bricks at the same grid cell but different slice
+        positions are distinct cache entries.
     """
 
     level: int
     gz: int
     gy: int
     gx: int
+    slice_coord: tuple[tuple[int, int], ...] = ()
 
 
 @dataclass
@@ -266,6 +271,42 @@ class TileManager:
             return slot_idx
 
         raise RuntimeError("_evict_lru: heap exhausted with no valid victim")
+
+    def evict_stale_slice_coords(
+        self,
+        current_slice_coord: tuple[tuple[int, int], ...],
+    ) -> int:
+        """Evict committed bricks from old slice coordinates.
+
+        Keeps ``current_slice_coord`` and the single most-recently-accessed
+        previous coordinate as a fallback buffer for the two-phase LUT rebuild.
+        All other slice coordinates are evicted.
+
+        In-flight slots are unaffected (handled by ``release_all_in_flight``).
+
+        Returns
+        -------
+        int
+            Number of bricks evicted.
+        """
+        # Find the most recently accessed coord that is not the current one.
+        prev_coord: tuple[tuple[int, int], ...] | None = None
+        prev_ts = -1
+        for key, slot in self.tilemap.items():
+            if key.slice_coord != current_slice_coord and slot.timestamp > prev_ts:
+                prev_ts = slot.timestamp
+                prev_coord = key.slice_coord
+
+        keep = {current_slice_coord}
+        if prev_coord is not None:
+            keep.add(prev_coord)
+
+        to_evict = [key for key in self.tilemap if key.slice_coord not in keep]
+        for key in to_evict:
+            slot = self.tilemap.pop(key)
+            self.slot_index[slot.index] = None
+            self.free_slots.append(slot.index)
+        return len(to_evict)
 
     def clear(self) -> None:
         """Reset to an empty cache, discarding all committed and in-flight bricks."""

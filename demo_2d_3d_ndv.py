@@ -74,7 +74,8 @@ def reslice_3d(
     resolved: ResolvedDisplayState,
     upload_queue: collections.deque,
     lod_bias: float = LOD_BIAS,
-) -> None:
+    prev_slice_coord: tuple[tuple[int, int], ...] = (),
+) -> tuple[tuple[int, int], ...]:
     """Plan and submit asynchronous 3-D brick requests for the current view.
 
     Cancels any pending work, selects visible bricks for the current camera
@@ -111,6 +112,21 @@ def reslice_3d(
     # a consistent timestamp.
     volume_handle.advance_frame()
 
+    # Derive the cache key for the current non-displayed axis position.
+    visible = set(resolved.visible_axes)
+    slice_coord: tuple[tuple[int, int], ...] = tuple(sorted(
+        (ax, v)
+        for ax, v in resolved.current_index.items()
+        if isinstance(v, int) and ax not in visible
+    ))
+
+    # Evict bricks from stale slice coordinates when the axis position changes.
+    # Keeps one previous coord as fallback for the two-phase LUT rebuild.
+    if slice_coord != prev_slice_coord:
+        n_evicted = volume_handle.evict_stale_slice_coords(slice_coord)
+    else:
+        n_evicted = 0
+
     # Scales for the displayed axes in display order (used by LOD and culling).
     voxel_scales = np.asarray(wrapper.voxel_sizes, dtype=np.float64)[list(resolved.visible_axes)]
 
@@ -121,6 +137,7 @@ def reslice_3d(
         volume_handle.brick_layout,
         voxel_scales,
         lod_bias,
+        slice_coord=slice_coord,
     )
 
     # Build inverse level transforms (world → level-k data coordinates) needed
@@ -137,7 +154,13 @@ def reslice_3d(
         list(wrapper.level_shapes),
         world_to_level,
         volume_handle.expand_fetch_index,
+        slice_coord=slice_coord,
     )
+
+    # If evictions changed the cache but no new fetches are needed, rebuild
+    # the LUT immediately so the display reflects the evictions right away.
+    if n_evicted > 0 and not requests:
+        volume_handle.commit(current_slice_coord=slice_coord)
 
     # Capture the slice ID so the callback can drop stale batches if a newer
     # reslice supersedes this one before results arrive.
@@ -153,6 +176,8 @@ def reslice_3d(
         fetch_fn=lambda req: wrapper.isel(req.index, level=req.level),
         callback=on_batch,
     )
+
+    return slice_coord
 
 
 def reslice_2d(
@@ -377,6 +402,7 @@ class Viewer(QtWidgets.QWidget):
 
         self.mode = "3d"
         self.slice_coord_2d: tuple[tuple[int, int], ...] = ()
+        self.slice_coord_3d: tuple[tuple[int, int], ...] = ()
         self.settle_ms = 150
         self._last_view_state: tuple[object, ...] | None = None
 
@@ -518,13 +544,14 @@ class Viewer(QtWidgets.QWidget):
             resolved = resolve(self.display_model_3d, self.wrapper)
             self.visual.update_display_axes(resolved.visible_axes)
             camera_view = camera_view_from_gfx_3d(self.camera_3d, self.canvas)
-            reslice_3d(
+            self.slice_coord_3d = reslice_3d(
                 volume_handle=self.visual.volume_handle,
                 wrapper=self.wrapper,
                 camera_view=camera_view,
                 slicer=self.slicer_obj,
                 resolved=resolved,
                 upload_queue=self.upload_queue_3d,
+                prev_slice_coord=self.slice_coord_3d,
             )
             return
 
@@ -575,7 +602,7 @@ class Viewer(QtWidgets.QWidget):
         if self.upload_queue_3d:
             n_3d = min(CHUNKS_PER_FRAME_3D, len(self.upload_queue_3d))
             drain = [self.upload_queue_3d.popleft() for _ in range(n_3d)]
-            self.visual.on_data_ready(drain)
+            self.visual.on_data_ready(drain, self.slice_coord_3d)
 
         if self.upload_queue_2d:
             n_2d = min(CHUNKS_PER_FRAME_2D, len(self.upload_queue_2d))

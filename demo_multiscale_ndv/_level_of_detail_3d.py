@@ -346,13 +346,19 @@ def sort_arr_by_distance(
 # ---------------------------------------------------------------------------
 
 
-def arr_to_brick_keys(arr: np.ndarray) -> dict[BlockKey3D, int]:
+def arr_to_brick_keys(
+    arr: np.ndarray,
+    slice_coord: tuple[tuple[int, int], ...] = (),
+) -> dict[BlockKey3D, int]:
     """Convert a brick array to ``dict[BlockKey3D, int]``.
 
     Parameters
     ----------
     arr : ndarray, shape (M, 4), dtype int32
         Columns: ``[level, gz_c, gy_c, gx_c]``.
+    slice_coord : tuple of (axis, index) pairs, optional
+        Current non-displayed axis position; baked into every key so that
+        bricks from different slice positions are distinct cache entries.
 
     Returns
     -------
@@ -362,6 +368,12 @@ def arr_to_brick_keys(arr: np.ndarray) -> dict[BlockKey3D, int]:
     required: dict[BlockKey3D, int] = {}
     for row in arr:
         level = int(row[0])
-        key = BlockKey3D(level=level, gz=int(row[1]), gy=int(row[2]), gx=int(row[3]))
+        key = BlockKey3D(
+            level=level,
+            gz=int(row[1]),
+            gy=int(row[2]),
+            gx=int(row[3]),
+            slice_coord=slice_coord,
+        )
         required[key] = level
     return required

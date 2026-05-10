@@ -56,13 +56,17 @@ import demo_multiscale_ndv.shaders._multiscale_volume_brick as _brick_reg  # noq
 # ---------------------------------------------------------------------------
 
 
-def _bk_to_block_key_3d(key: BrickKey) -> BlockKey3D:
+def _bk_to_block_key_3d(
+    key: BrickKey,
+    slice_coord: tuple[tuple[int, int], ...] = (),
+) -> BlockKey3D:
     """BrickKey (0-indexed level) → BlockKey3D (1-indexed level)."""
     return BlockKey3D(
         level=key.level + 1,
         gz=key.brick_coords[0],
         gy=key.brick_coords[1],
         gx=key.brick_coords[2],
+        slice_coord=slice_coord,
     )
 
 
@@ -93,9 +97,13 @@ class _CacheQueryAdapter3D:
     def capacity(self) -> int:
         return self._handle._block_cache.info.n_slots - 1
 
-    def is_resident(self, key: BrickKey) -> bool:
+    def is_resident(
+        self,
+        key: BrickKey,
+        slice_coord: tuple[tuple[int, int], ...] = (),
+    ) -> bool:
         """Return True and refresh LRU timestamp if brick is resident."""
-        block_key = _bk_to_block_key_3d(key)
+        block_key = _bk_to_block_key_3d(key, slice_coord)
         tm = self._handle._block_cache.tile_manager
         if block_key not in tm.tilemap:
             return False
@@ -105,9 +113,13 @@ class _CacheQueryAdapter3D:
         heapq.heappush(tm._lru_heap, (fn, slot.index))
         return True
 
-    def allocate_slot(self, key: BrickKey) -> SlotId:
+    def allocate_slot(
+        self,
+        key: BrickKey,
+        slice_coord: tuple[tuple[int, int], ...] = (),
+    ) -> SlotId:
         """Reserve a cache slot for *key*, evicting LRU if necessary."""
-        block_key = _bk_to_block_key_3d(key)
+        block_key = _bk_to_block_key_3d(key, slice_coord)
         tm = self._handle._block_cache.tile_manager
         fn = self._handle.frame_number
         if tm.free_slots:
@@ -353,16 +365,28 @@ class GFXMultiscaleVolumeHandle(MultiscaleVolumeHandle):
         self._block_cache.write_brick(tile_slot, data, key=block_key)
         self._pending_commits.append((block_key, tile_slot))
 
-    def commit(self) -> None:
+    def commit(
+        self,
+        current_slice_coord: tuple[tuple[int, int], ...] | None = None,
+    ) -> None:
         for block_key, slot in self._pending_commits:
             self._block_cache.tile_manager.commit(block_key, slot)
         self._pending_commits.clear()
-        self._lut_manager.rebuild(self._block_cache.tile_manager)
+        self._lut_manager.rebuild(
+            self._block_cache.tile_manager,
+            current_slice_coord=current_slice_coord,
+        )
 
     def invalidate_pending(self) -> None:
         self._block_cache.tile_manager.release_all_in_flight()
         self._pending_writes.clear()
         self._pending_commits.clear()
+
+    def evict_stale_slice_coords(
+        self,
+        current_slice_coord: tuple[tuple[int, int], ...],
+    ) -> int:
+        return self._block_cache.tile_manager.evict_stale_slice_coords(current_slice_coord)
 
     def cache_query(self) -> CacheQuery:
         return self._cache_query_adapter

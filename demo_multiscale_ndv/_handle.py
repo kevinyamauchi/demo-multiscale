@@ -40,7 +40,10 @@ class MultiscaleVolumeHandle(CanvasElement, LUTView):
         """Write *data* into the GPU cache at *slot* and queue for commit."""
 
     @abstractmethod
-    def commit(self) -> None:
+    def commit(
+        self,
+        current_slice_coord: tuple[tuple[int, int], ...] | None = None,
+    ) -> None:
         """Move all queued writes to the tilemap and rebuild the LUT."""
 
     @abstractmethod
@@ -58,6 +61,13 @@ class MultiscaleVolumeHandle(CanvasElement, LUTView):
     @abstractmethod
     def advance_frame(self) -> None:
         """Increment the LRU frame counter for this frame's cache queries."""
+
+    @abstractmethod
+    def evict_stale_slice_coords(
+        self,
+        current_slice_coord: SliceCoord,
+    ) -> int:
+        """Evict bricks from old slice coordinates; return count evicted."""
 
     @abstractmethod
     def expand_fetch_index(

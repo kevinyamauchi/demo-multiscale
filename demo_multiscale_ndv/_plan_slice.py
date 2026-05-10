@@ -174,6 +174,7 @@ def select_visible_bricks_3d(
     voxel_scales: np.ndarray,
     lod_bias: float = 1.0,
     force_level: int | None = None,
+    slice_coord: tuple[tuple[int, int], ...] = (),
 ) -> list:
     """Select and prioritize visible bricks for the current 3-D camera view.
 
@@ -274,7 +275,7 @@ def select_visible_bricks_3d(
             level_translation_arr_shader=brick_layout._translation_arr_shader,
         )
 
-    return arr_to_brick_keys(brick_arr)
+    return arr_to_brick_keys(brick_arr, slice_coord=slice_coord)
 
 
 def build_fetch_requests_3d(
@@ -285,6 +286,7 @@ def build_fetch_requests_3d(
     full_level_shapes: list[tuple[int, ...]],
     world_to_level_transforms: list[AffineTransform],
     expand_fetch_index: ExpandFetchIndex,
+    slice_coord: tuple[tuple[int, int], ...] = (),
 ) -> list[MultiscaleChunkRequest]:
     """Check cache residency, allocate slots, and build fetch requests for 3-D bricks.
 
@@ -354,9 +356,9 @@ def build_fetch_requests_3d(
             brick_coords=(block_key.gz, block_key.gy, block_key.gx),
         )
         # Skip bricks already loaded in the GPU cache; they need no re-fetch.
-        if cache_query.is_resident(bk):
+        if cache_query.is_resident(bk, slice_coord):
             continue
-        slot_id = cache_query.allocate_slot(bk)
+        slot_id = cache_query.allocate_slot(bk, slice_coord)
         chunk_id = uuid4()
         z0, y0, x0, z1, y1, x1 = _brick_key_to_core_coords(block_key, block_size)
         level_index = block_key.level - 1

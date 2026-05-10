@@ -379,12 +379,13 @@ class GFXMultiscaleImageVisual:
     def on_data_ready(
         self,
         batch: list[tuple[MultiscaleChunkRequest, np.ndarray]],
+        slice_coord: tuple[tuple[int, int], ...] | None = None,
     ) -> None:
         for req, data in batch:
             if req.slot_id is None:
                 continue
             self._volume_handle.set_brick(req.slot_id, data)
-        self._volume_handle.commit()
+        self._volume_handle.commit(current_slice_coord=slice_coord)
 
     # ── 2-D upload ──────────────────────────────────────────────────────
 
