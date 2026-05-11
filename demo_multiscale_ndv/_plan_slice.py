@@ -236,7 +236,7 @@ def select_visible_bricks_3d(
     if force_level is None and fov_y_rad > 0:
         focal_half_height_world = (screen_height_px / 2.0) / np.tan(fov_y_rad / 2.0)
         thresholds: list[float] | None = [
-            brick_layout._level_scale_factors[k - 1] * focal_half_height_world * lod_bias
+            brick_layout._level_scale_factors[k - 1] * focal_half_height_world / lod_bias
             for k in range(1, brick_layout.n_levels)
         ]
     else:

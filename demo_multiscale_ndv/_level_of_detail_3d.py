@@ -45,16 +45,16 @@ CORNER_OFFSETS = np.array(
 def build_level_grids(
     base_layout: BlockLayout3D,
     n_levels: int,
-    level_shapes: list[tuple[int, ...]] | None = None,
-    scale_vecs_shader: list[np.ndarray] | None = None,
-    translation_vecs_shader: list[np.ndarray] | None = None,
+    level_shapes: list[tuple[int, ...]],
+    scale_vecs_shader: list[np.ndarray],
+    translation_vecs_shader: list[np.ndarray],
 ) -> list[dict]:
     """Precompute static per-level coarse grid arrays.  Called once at startup.
 
     For level k (1-indexed):
 
     - The coarse grid dims are computed from ``level_shapes`` (actual
-      voxel counts per level) instead of a power-of-2 assumption.
+      voxel counts per level).
     - World-space brick centres incorporate per-axis scale and
       translation from the level transforms.
 
@@ -64,12 +64,11 @@ def build_level_grids(
         Layout of the finest (level 1) resolution.
     n_levels : int
         Total number of LOD levels.
-    level_shapes : list[tuple[int, ...]] or None
-        ``(D, H, W)`` shape per level (data order).  When ``None``,
-        falls back to power-of-2 derivation from ``base_layout``.
-    scale_vecs_shader : list[np.ndarray] or None
+    level_shapes : list[tuple[int, ...]]
+        ``(D, H, W)`` shape per level (data order).
+    scale_vecs_shader : list[np.ndarray]
         ``(3,)`` per level in shader order ``(x=W, y=H, z=D)``.
-    translation_vecs_shader : list[np.ndarray] or None
+    translation_vecs_shader : list[np.ndarray]
         ``(3,)`` per level in shader order ``(x=W, y=H, z=D)``.
 
     Returns
@@ -81,26 +80,22 @@ def build_level_grids(
             ``[level, gz_c, gy_c, gx_c]`` for every coarse brick.
         ``centres`` : ndarray, shape (M_k, 3), dtype float64
             World-space ``(x, y, z)`` centre of each coarse brick.
+        ``half_extents`` : ndarray, shape (3,), dtype float64
+            Half the brick world-space size along each axis ``(x, y, z)``.
+            Used by ``select_levels_from_cache`` to compute max-corner
+            distances for the lower-bound LOD threshold check.
     """
     bs = base_layout.block_size
-    gd, gh, gw = base_layout.grid_dims
 
     grids = []
     for level in range(1, n_levels + 1):
         k = level - 1  # 0-indexed
 
-        # Coarse grid dimensions from actual level shapes.
-        if level_shapes is not None:
-            # data order: (D=axis0, H=axis1, W=axis2)
-            d_k, h_k, w_k = level_shapes[k]
-            cgd = (d_k + bs - 1) // bs  # z grid dim
-            cgh = (h_k + bs - 1) // bs  # y grid dim
-            cgw = (w_k + bs - 1) // bs  # x grid dim
-        else:
-            scale = 1 << k
-            cgd = (gd + scale - 1) // scale
-            cgh = (gh + scale - 1) // scale
-            cgw = (gw + scale - 1) // scale
+        # Coarse grid dimensions from actual level shapes (data order: D, H, W).
+        d_k, h_k, w_k = level_shapes[k]
+        cgd = (d_k + bs - 1) // bs  # z grid dim
+        cgh = (h_k + bs - 1) // bs  # y grid dim
+        cgw = (w_k + bs - 1) // bs  # x grid dim
 
         gz_c, gy_c, gx_c = np.meshgrid(
             np.arange(cgd, dtype=np.int32),
@@ -115,24 +110,20 @@ def build_level_grids(
         lvl_col = np.full(len(gz_c), level, dtype=np.int32)
         arr = np.stack([lvl_col, gz_c, gy_c, gx_c], axis=1)  # (M_k, 4)
 
-        centres = np.empty((len(gz_c), 3), dtype=np.float64)
-        if scale_vecs_shader is not None and translation_vecs_shader is not None:
-            sv = scale_vecs_shader[k]  # (sx, sy, sz) = (W, H, D)
-            tv = translation_vecs_shader[k]  # (tx, ty, tz)
-            bw_x = float(bs * sv[0])  # W axis
-            bw_y = float(bs * sv[1])  # H axis
-            bw_z = float(bs * sv[2])  # D axis
-            centres[:, 0] = (gx_c + 0.5) * bw_x + tv[0]  # x = W
-            centres[:, 1] = (gy_c + 0.5) * bw_y + tv[1]  # y = H
-            centres[:, 2] = (gz_c + 0.5) * bw_z + tv[2]  # z = D
-        else:
-            scale = 1 << k
-            bw = float(bs * scale)
-            centres[:, 0] = (gx_c + 0.5) * bw  # x = W axis
-            centres[:, 1] = (gy_c + 0.5) * bw  # y = H axis
-            centres[:, 2] = (gz_c + 0.5) * bw  # z = D axis
+        sv = scale_vecs_shader[k]  # (sx, sy, sz) = (W, H, D)
+        tv = translation_vecs_shader[k]  # (tx, ty, tz)
+        bw_x = float(bs * sv[0])  # W axis
+        bw_y = float(bs * sv[1])  # H axis
+        bw_z = float(bs * sv[2])  # D axis
 
-        grids.append({"arr": arr, "centres": centres})
+        centres = np.empty((len(gz_c), 3), dtype=np.float64)
+        centres[:, 0] = (gx_c + 0.5) * bw_x + tv[0]  # x = W
+        centres[:, 1] = (gy_c + 0.5) * bw_y + tv[1]  # y = H
+        centres[:, 2] = (gz_c + 0.5) * bw_z + tv[2]  # z = D
+
+        half_extents = np.array([bw_x / 2.0, bw_y / 2.0, bw_z / 2.0], dtype=np.float64)
+
+        grids.append({"arr": arr, "centres": centres, "half_extents": half_extents})
 
     return grids
 
@@ -205,10 +196,22 @@ def select_levels_from_cache(
             mask = (
                 dist < thresholds[0] if thresholds else np.ones(len(dist), dtype=bool)
             )
-        elif level == n_levels:
-            mask = dist >= thresholds[level - 2]
         else:
-            mask = (dist >= thresholds[level - 2]) & (dist < thresholds[level - 1])
+            # Max-corner distance: the farthest point of the brick AABB from the
+            # camera.  Using this for the lower-bound guarantees that any brick
+            # whose far corner extends past the threshold is included at this
+            # (coarser) level, closing the coverage gap that centre-distance
+            # checks leave at LOD boundaries on anisotropic datasets.
+            half_e = grid["half_extents"]  # (3,) world-space half-extents
+            max_corner_dist = np.sqrt(((np.abs(diff) + half_e) ** 2).sum(axis=1))
+
+            if level == n_levels:
+                mask = max_corner_dist >= thresholds[level - 2]
+            else:
+                # Upper bound still uses centre distance — a brick whose centre
+                # is within the fine-level band belongs there even if its far
+                # corner nudges past the coarser threshold.
+                mask = (max_corner_dist >= thresholds[level - 2]) & (dist < thresholds[level - 1])
 
         if mask.any():
             parts.append(arr_k[mask])
@@ -328,13 +331,6 @@ def sort_arr_by_distance(
             cx[mask] = (gx_c[mask].astype(np.float64) + 0.5) * bw_x + tv[0]
             cy[mask] = (gy_c[mask].astype(np.float64) + 0.5) * bw_y + tv[1]
             cz[mask] = (gz_c[mask].astype(np.float64) + 0.5) * bw_z + tv[2]
-    else:
-        # Fallback: isotropic power-of-2 approximation (ignores physical scale).
-        scales = np.left_shift(1, (levels - 1)).astype(np.float64)
-        bw = float(block_size) * scales
-        cx = (gx_c.astype(np.float64) + 0.5) * bw
-        cy = (gy_c.astype(np.float64) + 0.5) * bw
-        cz = (gz_c.astype(np.float64) + 0.5) * bw
 
     distances = np.sqrt((cx - cam[0]) ** 2 + (cy - cam[1]) ** 2 + (cz - cam[2]) ** 2)
     order = np.argsort(distances, kind="stable")
